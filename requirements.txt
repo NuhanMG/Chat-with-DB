@@ -1,0 +1,35 @@
+# Core dependencies
+pandas
+numpy
+openpyxl
+xlrd
+TensorFlow
+scikit-learn
+torch
+
+# LangChain and LLM - Ollama version
+langchain
+langchain-community
+langchain-core
+langchain-ollama
+langchain-experimental
+pydantic
+chromadb
+
+# Visualization
+plotly
+matplotlib
+seaborn
+gradio
+kaleido
+
+# Utilities
+python-dotenv
+requests
+tqdm
+
+# API server (FastAPI for REST API)
+fastapi
+uvicorn[standard]
+python-multipart
+
