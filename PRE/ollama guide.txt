@@ -1,0 +1,104 @@
+curl http://localhost:11434/api/tags
+
+ollama list
+
+curl -fsSL https://ollama.com/install.sh | sh    
+
+pip install Langchain-ollama  or install using install -r requirements.txt
+
+curl -s http://localhost:11434/api/tags    
+
+try { Invoke-WebRequest -Uri "http://localhost:11434/api/tags" -UseBasicParsing | Select-Object -ExpandProperty Content } catch { Write-Host "Ollama not running or not accessible" }  
+
+ollama pull llama3.1:8b
+
+Get-Command ollama -ErrorAction SilentlyContinue     
+
+Test-Path "C:\Program Files\Ollama\ollama.exe"    
+
+#######################################################################################################
+Deploying System on new workspace
+#######################################################################################################
+
+# Checking LLM
+1.1# Check ollama exe exists
+Test-Path "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"   
+
+1.2# Add ollama path to path an check if it's running
+$env:PATH += ";$env:LOCALAPPDATA\Programs\Ollama"; ollama list      
+
+
+
+2# Start ollama service - if it is not running
+ollama serve
+
+
+
+
+3# Download Qwen model
+$env:PATH += ";$env:LOCALAPPDATA\Programs\Ollama"; ollama pull qwen2.5:7b                                                                                                                      
+
+
+
+4# Verify model is downloaded 
+ollama list 
+
+curl -s http://localhost:11434/api/tags    
+
+
+
+5# Download requirements.txt
+
+
+6# Creating Venv
+6.1# Create virtual environment
+python -m venv .venv
+
+6.2# Activate virtual environment
+.\.venv\Scripts\Activate.ps1
+
+6.3# Install dependencies in virtual environment
+.\.venv\Scripts\pip.exe install langchain-ollama pandas plotly requests python-dotenv pydantic numpy langchain-community
+
+
+
+
+7# Run Analyzer
+7.1# Basic usage with your data file
+$env:PATH += ";$env:LOCALAPPDATA\Programs\Ollama"
+.\.venv\Scripts\python.exe main_ollama.py your_data.csv --question "Your question here" --save-viz output_folder
+
+7.2# Example with interactive mode
+.\.venv\Scripts\python.exe main_ollama.py your_data.csv --interactive
+
+7.3# Example with specific question
+.\.venv\Scripts\python.exe main_ollama.py ecom.csv --question "Show payment methods by category using a suitable graph" --save-viz charts
+
+
+
+
+8# Troubleshooting
+8.1# If Ollama connection fails
+try { 
+    Invoke-WebRequest -Uri "http://localhost:11434/api/tags" -UseBasicParsing | Select-Object -ExpandProperty Content 
+} catch { 
+    Write-Host "Ollama not running or not accessible" 
+}
+
+8.2# Check if model is properly loaded
+curl http://localhost:11434/api/tags
+
+8.3# Restart Ollama if needed
+taskkill /f /im ollama.exe
+ollama serve
+
+
+
+
+
+
+
+                                                                                                                      
+$env:PATH += ";$env:LOCALAPPDATA\Programs\Ollama"; .\.venv\Scripts\python.exe main_ollama.py ecom.csv --question "Using suitable graph, show payment method used for each category" --save-viz output_dir         
+
+& C:/Users/Nuhan/Videos/sqlans/.venv/Scripts/python.exe c:/Users/Nuhan/Videos/sqlans/main_ollama.py "C:\Users\Nuhan\Videos\sqlans\marks.csv" --question "Using SUitable graph show the overall average of top 5 highest averaged students" --save-viz "marks"                           
