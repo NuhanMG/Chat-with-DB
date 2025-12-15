@@ -136,11 +136,15 @@ def load_conversation(filename: str) -> Tuple[List, str]:
                 pending_user = msg.content
             elif msg.role == "assistant":
                 # 1. Text Answer
+                content = msg.content
+                if msg.sql_query:
+                    content += f"\n\n**Generated SQL:**\n```sql\n{msg.sql_query}\n```"
+
                 if pending_user:
-                    history.append((pending_user, msg.content))
+                    history.append((pending_user, content))
                     pending_user = None
                 else:
-                    history.append((None, msg.content))
+                    history.append((None, content))
                 
                 # 2. Interactive Chart
                 if msg.figure_json:
@@ -280,7 +284,11 @@ def process_question(question: str, history: List):
         result = agent.answer_question_with_context(question)
         
         # 1. Text Answer
-        history.append((question, result['answer']))
+        answer_text = result['answer']
+        if result.get('sql_query'):
+            answer_text += f"\n\n**Generated SQL:**\n```sql\n{result['sql_query']}\n```"
+        
+        history.append((question, answer_text))
         
         # 2. Interactive Chart
         if result.get("visualization") and result["visualization"].get("chart"):
