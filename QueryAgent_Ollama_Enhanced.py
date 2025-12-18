@@ -25,7 +25,6 @@ from chromadb.config import Settings
 
 from conversation_manager import ConversationState, Message, DataContext, VisualizationRecord
 
-# Load environment variables from .env file
 load_dotenv()
 
 # Configure logging to output info level logs with timestamp
@@ -74,9 +73,9 @@ class QueryAgentEnhanced:
         vector_db_path: str = "./chroma_db_768dim",
         llm_model: str = "qwen2.5:7b",
         conversation_state: Optional[ConversationState] = None,
-        max_context_messages: int = 10,
+        max_context_messages: int = 5,
         max_data_contexts: int = 20,
-        temperature: float = 0.1,
+        temperature: float = 0.0,
         ollama_base_url: str = "http://localhost:11434",
         embedding_model: str = "nomic-embed-text"
     ):
@@ -105,6 +104,10 @@ class QueryAgentEnhanced:
         self.max_context_messages = 10
         self.max_data_contexts = max_data_contexts
         
+        # Performance caches
+        self._metadata_cache = {}
+        self._ollama_connection_verified = False
+        
         # Connect to the SQLite database
         self.conn = sqlite3.connect(source_db_path, check_same_thread=False)
         # Initialize LangChain SQLDatabase wrapper
@@ -124,10 +127,10 @@ class QueryAgentEnhanced:
                 model=llm_model,
                 base_url=ollama_base_url,
                 temperature=temperature,
-                num_ctx=4096,  # Context window size
-                num_predict=1024, # Max tokens to generate
+                num_ctx=2048,  # Context window size 
+                num_predict=512, # Max tokens to generate 
                 repeat_penalty=1.1, # Penalty for repetition
-                timeout=120 # Timeout in seconds
+                timeout=60# Timeout in seconds
             )
             logger.info(f"Successfully initialized Ollama with model: {llm_model}")
         except Exception as e:
@@ -302,7 +305,12 @@ class QueryAgentEnhanced:
             return {"error": str(e)}
 
     def test_ollama_connection(self) -> bool:
-        """Test if Ollama is running and accessible"""
+        """Test if Ollama is running and accessible (cached for performance)"""
+        
+        # Return cached result if already verified
+        if self._ollama_connection_verified:
+            return True
+        
         try:
             import requests
             # Check if Ollama API is reachable
@@ -313,6 +321,7 @@ class QueryAgentEnhanced:
                 model_names = [m.get('name', '') for m in models]
                 if self.llm_model in model_names or any(self.llm_model in name for name in model_names):
                     logger.info(f"✅ Ollama is running and model '{self.llm_model}' is available")
+                    self._ollama_connection_verified = True  # Cache the result
                     return True
                 else:
                     logger.warning(f"Model '{self.llm_model}' not found. Available: {model_names}")
@@ -357,62 +366,38 @@ class QueryAgentEnhanced:
             return {"result": response_text, "success": False, "parsing_error": str(e)}
 
     def _analyze_question_intent(self, question: str) -> IntentAnalysis:
-        """Analyze the intent of the user's question"""
+        """Analyze the intent of the user's question using heuristics to save LLM calls"""
         
-        # Get recent conversation context
-        recent_messages = self.conversation_state.get_recent_messages(10)
-        context_str = "\n".join([f"- {msg.role}: {msg.content}" for msg in recent_messages])
+        q_lower = question.lower()
         
-        # Construct prompt for intent classification
-        intent_prompt = f"""Analyze this question and determine the user's intent.
-
-Recent conversation:
-{context_str if context_str else "No previous conversation"}
-
-Current question: "{question}"
-
-Keywords indicating intent:
-- NEW_QUERY: "show me", "what are", "list all", "find", "get"
-- RE_VISUALIZE: "show as", "visualize as", "make a", "create chart", "different chart"
-- TRANSFORM: "calculate", "add", "filter", "sort", "group by"
-- COMBINE: "merge with", "combine", "join with", "add to"
-- COMPARE: "compare", "difference between", "vs", "versus"
-- CLARIFY: "what do you mean", "explain", "why"
-
-Words indicating reference to previous: "that", "this", "these", "those", "previous", "last", "earlier", "above"
-
-Return JSON with:
-- intent: one of [new_query, re_visualize, transform, combine, compare, clarify]
-- references_previous: true/false
-- referenced_concepts: list of concepts mentioned (e.g., ["sales", "products"])
-- needs_context: true if previous data is needed
-- confidence: 0.0 to 1.0
-
-Only return valid JSON, no other text."""
-
-        try:
-            # Invoke LLM to analyze intent
-            response = self.llm.invoke(intent_prompt)
-            content = response.content.strip()
+        # Check for references to previous context
+        reference_keywords = ["that", "this", "these", "those", "previous", "last", "earlier", "above", "it", "them"]
+        references_previous = any(word in q_lower for word in reference_keywords)
+        
+        # Default intent
+        intent = "new_query"
+        
+        # Heuristic intent detection based on keywords
+        if any(w in q_lower for w in ["show as", "visualize", "chart", "graph", "plot", "draw", "re draw"]):
+            intent = "re_visualize"
+        elif any(w in q_lower for w in ["calculate", "add", "filter", "sort", "group by", "arrange", "order by"]):
+            intent = "transform"
+        elif any(w in q_lower for w in ["compare", "difference", "vs", "versus", "diff"]):
+            intent = "compare"
+        elif any(w in q_lower for w in ["explain", "mean", "why", "clarify"]):
+            intent = "clarify"
+        elif any(w in q_lower for w in ["combine", "join", "merge", "union"]):
+            intent = "combine"
             
-            # Extract JSON from response
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0].strip()
-            
-            intent_data = json.loads(content)
-            return IntentAnalysis(**intent_data)
-        except Exception as e:
-            logger.warning(f"Intent analysis failed: {e}, defaulting to NEW_QUERY")
-            # Fallback to default intent if analysis fails
-            return IntentAnalysis(
-                intent="new_query",
-                references_previous=False,
-                referenced_concepts=[],
-                needs_context=False,
-                confidence=0.5
-            )
+        logger.info(f"Heuristic intent detection: {intent} (references_previous={references_previous})")
+
+        return IntentAnalysis(
+            intent=intent,
+            references_previous=references_previous,
+            referenced_concepts=[], # Optional for heuristics
+            needs_context=references_previous,
+            confidence=0.8
+        )
 
     def _build_context_prompt(self, question: str, intent: IntentAnalysis) -> str:
         """Build context-aware prompt including relevant conversation history"""
@@ -761,45 +746,19 @@ Generate appropriate SQL query considering the conversation context."""
         
         logger.info(f"Generated SQL: {final_sql}")
         
-        # Execute query with one automatic regeneration pass if execution fails
+        # Execute query once without retry loop for speed
         df = None
-        execution_error = None
-        for exec_attempt in range(2):
-            try:
-                df = pd.read_sql_query(final_sql, self.conn)
-                break
-            except Exception as e:
-                execution_error = str(e)
-                logger.error(f"SQL execution failed (attempt {exec_attempt + 1}): {execution_error}")
-                if exec_attempt == 1:
-                    return {
-                        "success": False,
-                        "error": f"Query execution failed: {execution_error}",
-                        "sql_query": final_sql,
-                        "question": question
-                    }
-                logger.info("Attempting to regenerate SQL using execution error feedback")
-                alias_summary = self._describe_query_aliases(final_sql)
-                repair_prompt = self._augment_prompt_with_error(
-                    context_prompt,
-                    final_sql,
-                    execution_error,
-                    alias_summary
-                )
-                try:
-                    regenerated_sql = self._generate_sql_with_retry(question, repair_prompt, metadata_str)
-                except Exception as regen_error:
-                    logger.error(f"SQL regeneration after execution failure failed: {regen_error}")
-                    return {
-                        "success": False,
-                        "error": f"Query execution failed: {execution_error}",
-                        "sql_query": final_sql,
-                        "question": question
-                    }
-                cleaned_sql = self._clean_sql(regenerated_sql)
-                cleaned_sql = self._remove_unwanted_limit(cleaned_sql, question)
-                final_sql = self._validate_and_fix_tables(cleaned_sql)
-                logger.info(f"Retry SQL after execution error: {final_sql}")
+        try:
+            df = pd.read_sql_query(final_sql, self.conn)
+        except Exception as e:
+            execution_error = str(e)
+            logger.error(f"SQL execution failed: {execution_error}")
+            return {
+                "success": False,
+                "error": f"Query execution failed: {execution_error}",
+                "sql_query": final_sql,
+                "question": question
+            }
         
         # Generate answer
         answer = self._generate_answer(question, df, final_sql)
@@ -824,8 +783,8 @@ Generate appropriate SQL query considering the conversation context."""
         
         return result
 
-    def _generate_sql_with_retry(self, question: str, context_prompt: str, metadata_str: str, max_retries: int = 2) -> str:
-        """Generate SQL with retry logic and fallback"""
+    def _generate_sql_with_retry(self, question: str, context_prompt: str, metadata_str: str, max_retries: int = 1) -> str:
+        """Generate SQL with minimal retries for speed"""
         for attempt in range(max_retries):
             try:
                 logger.info(f"SQL generation attempt {attempt + 1}/{max_retries}")
@@ -1209,13 +1168,23 @@ Example formats:
             ))
 
     
-    def _retrieve_metadata(self, question: str, top_k: int = 5) -> str:
-        """Retrieve relevant metadata from vector database"""
+    def _retrieve_metadata(self, question: str, top_k: int = 3) -> str:
+        """Retrieve relevant metadata from vector database with caching"""
+        
+        # Use cached metadata if available (simple keyword matching)
+        cache_key = frozenset(question.lower().split()[:5])  # First 5 words as key
+        if cache_key in self._metadata_cache:
+            logger.info("Using cached metadata")
+            return self._metadata_cache[cache_key]
+        
         try:
             if hasattr(self, 'table_collection') and self.table_collection:
-                # Query vector database for relevant table metadata
+                # Generate embedding using Ollama (768-dim for nomic-embed-text)
+                query_embedding = self._get_embedding(question)
+                
+                # Query vector database using embedding 
                 results = self.table_collection.query(
-                    query_texts=[question],
+                    query_embeddings=[query_embedding],
                     n_results=min(top_k, self.table_collection.count())
                 )
                 
@@ -1229,7 +1198,9 @@ Example formats:
                     table_info = f"Table: {metadata.get('table_name', 'Unknown')}"
                     metadata_parts.append(f"{table_info}\n{doc}")
                 
-                return "\n\n".join(metadata_parts)
+                result = "\n\n".join(metadata_parts)
+                self._metadata_cache[cache_key] = result  # Cache it
+                return result
             else:
                 logger.warning("Vector database not available, using basic schema")
                 return "Use available database schema"
@@ -1870,7 +1841,7 @@ Be specific with numbers when relevant."""
                 visualization_rationale="No visualization requested"
             )
         
-        # Try LLM-based recommendation
+        # Use LLM-based recommendation for accurate chart type detection
         try:
             parser = PydanticOutputParser(pydantic_object=VisualizationResponse)
             
@@ -1884,7 +1855,7 @@ Data info:
 - Numeric columns: {', '.join(df.select_dtypes(include=['number']).columns.tolist())}
 
 Sample data:
-{df.head().to_string()}
+{df.head(5).to_string()}
 
 {parser.get_format_instructions()}
 
@@ -2022,10 +1993,69 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
         
         try:
             import plotly.express as px
+            from pandas.api.types import is_numeric_dtype
             
             chart_type = viz_response.primary_chart.lower()
             title = viz_response.title or "Data Visualization"
             default_cat, default_num = self._select_default_columns(df)
+
+            def infer_range_category_order(values: pd.Series) -> Optional[List[str]]:
+                """Infer a logical ordering for categories like '<20', '20-30', '60+' etc."""
+                try:
+                    if values is None or len(values) == 0:
+                        return None
+                    if is_numeric_dtype(values):
+                        return None
+
+                    uniques = [str(v).strip() for v in pd.unique(values.dropna())]
+                    if len(uniques) < 2:
+                        return None
+
+                    parsed: List[Tuple[float, float, str]] = []
+                    unknown: List[str] = []
+
+                    re_between = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\s*$")
+                    re_plus = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*\+\s*$")
+                    re_less = re.compile(r"^\s*(?:<|<=|less\s+than|under)\s*(\d+(?:\.\d+)?)\s*$", re.IGNORECASE)
+                    re_ge = re.compile(r"^\s*(?:>=|at\s+least)\s*(\d+(?:\.\d+)?)\s*$", re.IGNORECASE)
+
+                    for label in uniques:
+                        m = re_less.match(label)
+                        if m:
+                            upper = float(m.group(1))
+                            parsed.append((-1.0e18, upper, label))
+                            continue
+                        m = re_between.match(label)
+                        if m:
+                            lo = float(m.group(1))
+                            hi = float(m.group(2))
+                            parsed.append((lo, hi, label))
+                            continue
+                        m = re_plus.match(label)
+                        if m:
+                            lo = float(m.group(1))
+                            parsed.append((lo, 1.0e18, label))
+                            continue
+                        m = re_ge.match(label)
+                        if m:
+                            lo = float(m.group(1))
+                            parsed.append((lo, 1.0e18, label))
+                            continue
+                        unknown.append(label)
+
+                    # Only apply custom ordering if we successfully parsed most categories
+                    if len(parsed) < 2:
+                        return None
+
+                    parsed_sorted = sorted(parsed, key=lambda t: (t[0], t[1]))
+                    ordered = [t[2] for t in parsed_sorted]
+                    # Append unknown categories at the end, preserving their original order
+                    for label in uniques:
+                        if label in unknown and label not in ordered:
+                            ordered.append(label)
+                    return ordered
+                except Exception:
+                    return None
 
             def normalize_axis(axis_value, prefer_numeric=False, allow_multiple=False):
                 if axis_value is None:
@@ -2158,11 +2188,38 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
                 )
             
             elif chart_type == "histogram":
-                fig = px.histogram(
-                    df,
-                    x=x_axis,
-                    title=title
-                )
+                x_col = x_axis
+                y_col: Optional[str] = None
+                if isinstance(y_axis, list):
+                    y_col = y_axis[0] if y_axis else None
+                else:
+                    y_col = y_axis
+
+                # If x is categorical (like age ranges) OR y is provided (already aggregated),
+                # render a bar chart instead of a numeric histogram.
+                if x_col and x_col in df.columns and (not is_numeric_dtype(df[x_col]) or y_col):
+                    if y_col and y_col in df.columns and is_numeric_dtype(df[y_col]):
+                        fig = px.bar(df, x=x_col, y=y_col, title=title)
+                    else:
+                        # No usable y column; compute frequency counts
+                        counts_df = (
+                            df[x_col]
+                            .astype(str)
+                            .value_counts(dropna=False)
+                            .rename_axis(x_col)
+                            .reset_index(name="count")
+                        )
+                        fig = px.bar(counts_df, x=x_col, y="count", title=title)
+
+                    order = infer_range_category_order(df[x_col])
+                    if order:
+                        fig.update_xaxes(categoryorder='array', categoryarray=order)
+                else:
+                    fig = px.histogram(
+                        df,
+                        x=x_col,
+                        title=title
+                    )
             
             elif chart_type == "box":
                 x_col = x_axis
@@ -2197,6 +2254,12 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
                     y=y_axis,
                     title=title
                 )
+
+            # Apply natural ordering for range-like categorical x axes where possible
+            if x_axis and x_axis in df.columns:
+                order = infer_range_category_order(df[x_axis])
+                if order:
+                    fig.update_xaxes(categoryorder='array', categoryarray=order)
             
             fig.update_layout(
                 template="plotly",

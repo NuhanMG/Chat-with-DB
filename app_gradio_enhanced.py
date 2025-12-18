@@ -19,7 +19,6 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Global State ---
 # Global instance of the QueryAgent
 agent: Optional[QueryAgentEnhanced] = None
 # Global instance of the ConversationState
@@ -323,6 +322,27 @@ def process_question(question: str, history: List):
 # --- UI Layout ---
 
 custom_css = """
+.gradio-container {
+    max-width: 100% !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+.contain {
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+.app {
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+.main-container {
+    gap: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
 .sidebar { padding: 20px; border-right: 1px solid var(--border-color-primary); height: 100vh; overflow-y: auto; }
 .chat-area { padding: 20px; height: 100vh; overflow-y: auto; }
 .avatar-image { border-radius: 50%; }
@@ -337,7 +357,7 @@ custom_css = """
 footer { visibility: hidden; }
 """
 
-with gr.Blocks(title="Data Chat", css=custom_css, theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="Data Chat", css=custom_css, theme=gr.themes.Soft(), fill_height=True, fill_width=True) as demo:
     
     with gr.Row(elem_classes="main-container"):
         
@@ -359,7 +379,20 @@ with gr.Blocks(title="Data Chat", css=custom_css, theme=gr.themes.Soft()) as dem
             with gr.Accordion("⚙️ Settings", open=True):
                 db_input = gr.Textbox(label="Database Path", value="analysis.db")
                 vec_input = gr.Textbox(label="Vector DB", value="./chroma_db_768dim")
-                model_input = gr.Dropdown(label="Model", choices=["qwen2.5:7b", "llama3", "mistral"], value="qwen2.5:7b")
+                model_input = gr.Dropdown(
+                    label="Model", 
+                    choices=[
+                        "qwen2.5:7b", 
+                        "qwen2.5-coder:7b", 
+                        "llama3.2:3b", 
+                        "gemma3:4b", 
+                        "qwen2.5:3b", 
+                        "qwen3:8b", 
+                        "qwen3:4b", 
+                        "deepseek-r1:8b"
+                    ], 
+                    value="qwen2.5:7b"
+                )
                 init_btn = gr.Button("Initialize the LLM Agent")
                 init_status = gr.Markdown("Not Connected")
 
