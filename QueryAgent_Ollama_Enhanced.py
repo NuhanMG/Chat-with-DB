@@ -73,7 +73,7 @@ class QueryAgentEnhanced:
         vector_db_path: str = "./chroma_db_768dim",
         llm_model: str = "qwen2.5:7b",
         conversation_state: Optional[ConversationState] = None,
-        max_context_messages: int = 5,
+        max_context_messages: int = 10,
         max_data_contexts: int = 20,
         temperature: float = 0.0,
         ollama_base_url: str = "http://localhost:11434",
@@ -378,7 +378,7 @@ class QueryAgentEnhanced:
         intent = "new_query"
         
         # Heuristic intent detection based on keywords
-        if any(w in q_lower for w in ["show as", "visualize", "chart", "graph", "plot", "draw", "re draw"]):
+        if any(w in q_lower for w in ["show again", "visualize", "again with", "chart", "graph", "plot", "draw", "re draw"]):
             intent = "re_visualize"
         elif any(w in q_lower for w in ["calculate", "add", "filter", "sort", "group by", "arrange", "order by"]):
             intent = "transform"
@@ -884,6 +884,9 @@ Generate appropriate SQL query considering the conversation context."""
                         filtered_df = filtered_df[filtered_df[col_name] == col_value]
                     logger.info(f"Applied filter {col_name}={col_value}, remaining rows: {len(filtered_df)}")
         
+        # Apply question-based filtering and data preparation
+        filtered_df = self._prepare_data_for_followup(question, filtered_df)
+        
         # Analyze what visualization is requested
         viz_response = self._should_visualize(question, filtered_df)
 
@@ -1001,6 +1004,171 @@ Generate appropriate SQL query considering the conversation context."""
         
         return result
 
+    def _prepare_data_for_followup(self, question: str, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Prepare data for follow-up questions by applying filters and reshaping.
+        
+        This is a general-purpose method that:
+        1. Filters data based on values mentioned in the question
+        2. Reshapes data when changing chart types (e.g., for pie charts)
+        
+        Args:
+            question: The follow-up question from the user
+            df: The dataframe from the previous query
+            
+        Returns:
+            Prepared dataframe suitable for the requested visualization
+        """
+        # Step 1: Apply question-based filtering
+        filtered_df = self._apply_question_filters(question, df)
+        
+        # Step 2: Reshape data if needed for the requested chart type
+        reshaped_df = self._reshape_data_for_chart(question, filtered_df)
+        
+        return reshaped_df
+
+    def _apply_question_filters(self, question: str, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Extract filter values from the question and apply them to the dataframe.
+        
+        Scans the question for values that exist in any column of the dataframe
+        and filters to only rows matching those values.
+        
+        Args:
+            question: The user's question
+            df: The dataframe to filter
+            
+        Returns:
+            Filtered dataframe
+        """
+        q_lower = question.lower()
+        filtered_df = df.copy()
+        applied_filters = []
+        
+        # Check each string/categorical column for values mentioned in the question
+        for col in df.select_dtypes(include=['object', 'category']).columns:
+            unique_values = df[col].dropna().unique()
+            for val in unique_values:
+                val_str = str(val).lower().strip()
+                # Skip very short values to avoid false matches (e.g., 'a', 'in')
+                if len(val_str) < 3:
+                    continue
+                # Check if this value is mentioned in the question
+                # Use word boundary matching to avoid partial matches
+                if re.search(r'\b' + re.escape(val_str) + r'\b', q_lower):
+                    logger.info(f"Filtering by {col}='{val}' based on question content")
+                    filtered_df = filtered_df[filtered_df[col].astype(str).str.lower().str.strip() == val_str]
+                    applied_filters.append((col, val))
+                    break  # Only filter by first match per column
+        
+        # If filtering resulted in empty dataframe, return original
+        if filtered_df.empty and applied_filters:
+            logger.warning("Question-based filtering resulted in empty dataframe, using original")
+            return df
+        
+        if applied_filters:
+            logger.info(f"Applied {len(applied_filters)} filter(s) from question: {applied_filters}")
+            
+        return filtered_df
+
+    def _reshape_data_for_chart(self, question: str, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Reshape dataframe structure to match the requested chart type.
+        
+        Handles cases like:
+        - Converting wide format (separate columns) to long format for pie charts
+        - Aggregating data when switching from detailed to summary views
+        
+        Args:
+            question: The user's question
+            df: The dataframe to reshape
+            
+        Returns:
+            Reshaped dataframe
+        """
+        q_lower = question.lower()
+        
+        # Detect requested chart type
+        target_chart = None
+        if 'pie' in q_lower:
+            target_chart = 'pie'
+        elif 'bar' in q_lower:
+            target_chart = 'bar'
+        elif 'line' in q_lower:
+            target_chart = 'line'
+        
+        if target_chart == 'pie':
+            # Pie charts need name/value pairs
+            # Check if we have multiple numeric columns that should be combined
+            reshaped = self._reshape_for_pie_chart(df)
+            if reshaped is not None:
+                return reshaped
+        
+        return df
+
+    def _reshape_for_pie_chart(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
+        """
+        Reshape dataframe for pie chart visualization.
+        
+        Handles multiple common data patterns:
+        1. Multiple numeric columns (e.g., Male, Female) -> melt to name/value
+        2. Already has a single category + value column -> return as-is
+        3. Multiple rows with same categories -> aggregate
+        
+        Args:
+            df: The dataframe to reshape
+            
+        Returns:
+            Reshaped dataframe suitable for pie chart, or None if no reshape needed
+        """
+        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+        non_numeric_cols = df.select_dtypes(exclude=['number']).columns.tolist()
+        
+        # Case 1: Multiple numeric columns representing categories (e.g., Male, Female)
+        # These should be melted into name/value format
+        if len(numeric_cols) >= 2:
+            # Check if column names look like category values
+            category_like_cols = []
+            for col in numeric_cols:
+                col_lower = col.lower()
+                # Common patterns for columns that are actually categories
+                if any(keyword in col_lower for keyword in 
+                       ['male', 'female', 'gender', 'count', 'total', 'sum', 
+                        'yes', 'no', 'true', 'false', 'active', 'inactive']):
+                    category_like_cols.append(col)
+            
+            # If we have category-like numeric columns, melt them
+            if len(category_like_cols) >= 2 or (len(numeric_cols) == 2 and len(non_numeric_cols) <= 1):
+                # Sum up all rows for each numeric column
+                totals = {col: df[col].sum() for col in numeric_cols}
+                
+                # Create pie chart format
+                pie_df = pd.DataFrame([
+                    {'Category': col, 'Value': total}
+                    for col, total in totals.items()
+                    if total > 0  # Exclude zero values
+                ])
+                
+                if not pie_df.empty:
+                    logger.info(f"Reshaped {len(numeric_cols)} numeric columns for pie chart: {totals}")
+                    return pie_df
+        
+        # Case 2: Single numeric column with a category column - aggregate if multiple rows
+        if len(numeric_cols) == 1 and len(non_numeric_cols) >= 1:
+            value_col = numeric_cols[0]
+            # Find the best category column (prefer shorter unique values)
+            cat_col = non_numeric_cols[0]
+            
+            # If we have multiple rows, aggregate by category
+            if len(df) > 1:
+                aggregated = df.groupby(cat_col)[value_col].sum().reset_index()
+                aggregated.columns = ['Category', 'Value']
+                logger.info(f"Aggregated data by {cat_col} for pie chart")
+                return aggregated
+        
+        # Case 3: Already in correct format or can't be reshaped
+        return None
+
     def _handle_transformation(self, question: str, df: pd.DataFrame) -> Dict[str, Any]:
         """Handle transformation of existing data (filter, sort, calculate)"""
         
@@ -1074,22 +1242,25 @@ Example formats:
     def _process_with_existing_data(self, question: str, df: pd.DataFrame) -> Dict[str, Any]:
         """Process question using existing data without new query"""
         
-        # Generate answer based on existing data
-        answer = self._generate_answer(question, df, None)
+        # Apply question-based filtering and data preparation
+        prepared_df = self._prepare_data_for_followup(question, df)
+        
+        # Generate answer based on prepared data
+        answer = self._generate_answer(question, prepared_df, None)
         # Determine if visualization is needed
-        viz_response = self._should_visualize(question, df)
+        viz_response = self._should_visualize(question, prepared_df)
         
         result = {
             "success": True,
             "question": question,
             "sql_query": None,
             "answer": answer,
-            "data": df,
+            "data": prepared_df,
             "visualization": None
         }
         
         if viz_response.should_visualize:
-            chart = self._create_visualization(df, viz_response)
+            chart = self._create_visualization(prepared_df, viz_response)
             result["visualization"] = {
                 "chart": chart,
                 "type": viz_response.primary_chart,
@@ -1790,17 +1961,36 @@ Example formats:
         data_summary = f"Found {len(df)} rows"
         if len(df) > 0:
             data_summary += f" with columns: {', '.join(df.columns.tolist())}"
-        
-        answer_prompt = f"""Question: {question}
 
-Data summary: {data_summary}
+        # Provide a larger sample when results are small to enable accurate summaries.
+        sample_df = df if len(df) <= 30 else df.head(10)
+        sample_data = sample_df.to_string(index=False)
+        column_types = ", ".join([f"{col}({str(dtype)})" for col, dtype in df.dtypes.items()])
 
-Sample data:
-{df.head(10).to_string()}
+        answer_prompt = f"""You are a careful data analyst. Answer using ONLY the data shown below.
+    Do NOT mention charts/plots/graphs/visualizations. Do NOT apologize about not plotting. The system renders visuals separately.
 
-Provide a clear, concise answer to the question based on this data. 
-Focus on key insights and patterns.
-Be specific with numbers when relevant."""
+    Question:
+    {question}
+
+    Data summary:
+    {data_summary}
+
+    Columns (name(type)):
+    {column_types}
+
+    Sample data (may be truncated):
+    {sample_data}
+
+    Answer format requirements:
+    1) Start with a direct 1–2 sentence answer.
+    2) Then provide 3–6 bullets with the most important quantitative findings.
+       - Include totals, counts, and percentages/shares when applicable.
+       - For categorical breakdowns (e.g., gender/category/region), list each group with its value and its share of the total.
+       - Call out the top group and the gap vs the next group when relevant.
+    3) If the provided rows are insufficient to compute an exact metric (e.g., sample is truncated), say so explicitly and avoid guessing.
+    4) Plain text only. No SQL. No Python.
+    """
 
         try:
             response = self.llm.invoke(answer_prompt)
@@ -2099,6 +2289,33 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
                     if chart_type != "pie" and y_axis is None and len(df.columns) > 1:
                         y_axis = df.columns[1]
             
+            # Check if we have NO numeric columns at all - need to compute counts
+            numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+            needs_count_aggregation = len(numeric_cols) == 0 and len(df.columns) >= 2
+            
+            if needs_count_aggregation:
+                # All columns are categorical - compute counts for visualization
+                cat_cols = df.columns.tolist()
+                if len(cat_cols) >= 2:
+                    # Use first column as x-axis, second as color/grouping, compute counts
+                    x_col = cat_cols[0]
+                    color_col = cat_cols[1] if len(cat_cols) > 1 else None
+                    
+                    # Aggregate to get counts
+                    if color_col:
+                        df_counts = df.groupby([x_col, color_col]).size().reset_index(name='count')
+                        logger.info(f"Computed counts for categorical data: {x_col} by {color_col}")
+                    else:
+                        df_counts = df.groupby(x_col).size().reset_index(name='count')
+                        logger.info(f"Computed counts for categorical data: {x_col}")
+                    
+                    # Override df and axis settings for the chart
+                    df = df_counts
+                    x_axis = x_col
+                    y_axis = 'count'
+                    if color_col and not color_by:
+                        color_by = color_col
+            
             if chart_type == "bar":
                 fig = px.bar(
                     df,
@@ -2154,10 +2371,14 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
                 )
             
             elif chart_type == "pie":
+                # Safely select top 10 rows for pie chart
+                df_pie = df.copy()
                 if len(df) > 10:
-                    df_pie = df.nlargest(10, y_axis) if y_axis else df.head(10)
-                else:
-                    df_pie = df
+                    # Only use nlargest if y_axis is a valid numeric column
+                    if y_axis and y_axis in df.columns and is_numeric_dtype(df[y_axis]):
+                        df_pie = df.nlargest(10, y_axis)
+                    else:
+                        df_pie = df.head(10)
                 
                 fig = px.pie(
                     df_pie,
