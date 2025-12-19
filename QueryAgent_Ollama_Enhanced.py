@@ -25,7 +25,6 @@ from chromadb.config import Settings
 
 from conversation_manager import ConversationState, Message, DataContext, VisualizationRecord
 
-# Load environment variables from .env file
 load_dotenv()
 
 # Configure logging to output info level logs with timestamp
@@ -76,7 +75,7 @@ class QueryAgentEnhanced:
         conversation_state: Optional[ConversationState] = None,
         max_context_messages: int = 10,
         max_data_contexts: int = 20,
-        temperature: float = 0.1,
+        temperature: float = 0.0,
         ollama_base_url: str = "http://localhost:11434",
         embedding_model: str = "nomic-embed-text"
     ):
@@ -105,6 +104,10 @@ class QueryAgentEnhanced:
         self.max_context_messages = 10
         self.max_data_contexts = max_data_contexts
         
+        # Performance caches
+        self._metadata_cache = {}
+        self._ollama_connection_verified = False
+        
         # Connect to the SQLite database
         self.conn = sqlite3.connect(source_db_path, check_same_thread=False)
         # Initialize LangChain SQLDatabase wrapper
@@ -124,10 +127,10 @@ class QueryAgentEnhanced:
                 model=llm_model,
                 base_url=ollama_base_url,
                 temperature=temperature,
-                num_ctx=4096,  # Context window size
-                num_predict=1024, # Max tokens to generate
+                num_ctx=2048,  # Context window size 
+                num_predict=512, # Max tokens to generate 
                 repeat_penalty=1.1, # Penalty for repetition
-                timeout=120 # Timeout in seconds
+                timeout=60# Timeout in seconds
             )
             logger.info(f"Successfully initialized Ollama with model: {llm_model}")
         except Exception as e:
@@ -302,7 +305,12 @@ class QueryAgentEnhanced:
             return {"error": str(e)}
 
     def test_ollama_connection(self) -> bool:
-        """Test if Ollama is running and accessible"""
+        """Test if Ollama is running and accessible (cached for performance)"""
+        
+        # Return cached result if already verified
+        if self._ollama_connection_verified:
+            return True
+        
         try:
             import requests
             # Check if Ollama API is reachable
@@ -313,6 +321,7 @@ class QueryAgentEnhanced:
                 model_names = [m.get('name', '') for m in models]
                 if self.llm_model in model_names or any(self.llm_model in name for name in model_names):
                     logger.info(f"✅ Ollama is running and model '{self.llm_model}' is available")
+                    self._ollama_connection_verified = True  # Cache the result
                     return True
                 else:
                     logger.warning(f"Model '{self.llm_model}' not found. Available: {model_names}")
@@ -357,62 +366,38 @@ class QueryAgentEnhanced:
             return {"result": response_text, "success": False, "parsing_error": str(e)}
 
     def _analyze_question_intent(self, question: str) -> IntentAnalysis:
-        """Analyze the intent of the user's question"""
+        """Analyze the intent of the user's question using heuristics to save LLM calls"""
         
-        # Get recent conversation context
-        recent_messages = self.conversation_state.get_recent_messages(10)
-        context_str = "\n".join([f"- {msg.role}: {msg.content}" for msg in recent_messages])
+        q_lower = question.lower()
         
-        # Construct prompt for intent classification
-        intent_prompt = f"""Analyze this question and determine the user's intent.
-
-Recent conversation:
-{context_str if context_str else "No previous conversation"}
-
-Current question: "{question}"
-
-Keywords indicating intent:
-- NEW_QUERY: "show me", "what are", "list all", "find", "get"
-- RE_VISUALIZE: "show as", "visualize as", "make a", "create chart", "different chart"
-- TRANSFORM: "calculate", "add", "filter", "sort", "group by"
-- COMBINE: "merge with", "combine", "join with", "add to"
-- COMPARE: "compare", "difference between", "vs", "versus"
-- CLARIFY: "what do you mean", "explain", "why"
-
-Words indicating reference to previous: "that", "this", "these", "those", "previous", "last", "earlier", "above"
-
-Return JSON with:
-- intent: one of [new_query, re_visualize, transform, combine, compare, clarify]
-- references_previous: true/false
-- referenced_concepts: list of concepts mentioned (e.g., ["sales", "products"])
-- needs_context: true if previous data is needed
-- confidence: 0.0 to 1.0
-
-Only return valid JSON, no other text."""
-
-        try:
-            # Invoke LLM to analyze intent
-            response = self.llm.invoke(intent_prompt)
-            content = response.content.strip()
+        # Check for references to previous context
+        reference_keywords = ["that", "this", "these", "those", "previous", "last", "earlier", "above", "it", "them"]
+        references_previous = any(word in q_lower for word in reference_keywords)
+        
+        # Default intent
+        intent = "new_query"
+        
+        # Heuristic intent detection based on keywords
+        if any(w in q_lower for w in ["show again", "visualize", "again with", "chart", "graph", "plot", "draw", "re draw"]):
+            intent = "re_visualize"
+        elif any(w in q_lower for w in ["calculate", "add", "filter", "sort", "group by", "arrange", "order by"]):
+            intent = "transform"
+        elif any(w in q_lower for w in ["compare", "difference", "vs", "versus", "diff"]):
+            intent = "compare"
+        elif any(w in q_lower for w in ["explain", "mean", "why", "clarify"]):
+            intent = "clarify"
+        elif any(w in q_lower for w in ["combine", "join", "merge", "union"]):
+            intent = "combine"
             
-            # Extract JSON from response
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0].strip()
-            
-            intent_data = json.loads(content)
-            return IntentAnalysis(**intent_data)
-        except Exception as e:
-            logger.warning(f"Intent analysis failed: {e}, defaulting to NEW_QUERY")
-            # Fallback to default intent if analysis fails
-            return IntentAnalysis(
-                intent="new_query",
-                references_previous=False,
-                referenced_concepts=[],
-                needs_context=False,
-                confidence=0.5
-            )
+        logger.info(f"Heuristic intent detection: {intent} (references_previous={references_previous})")
+
+        return IntentAnalysis(
+            intent=intent,
+            references_previous=references_previous,
+            referenced_concepts=[], # Optional for heuristics
+            needs_context=references_previous,
+            confidence=0.8
+        )
 
     def _build_context_prompt(self, question: str, intent: IntentAnalysis) -> str:
         """Build context-aware prompt including relevant conversation history"""
@@ -761,45 +746,19 @@ Generate appropriate SQL query considering the conversation context."""
         
         logger.info(f"Generated SQL: {final_sql}")
         
-        # Execute query with one automatic regeneration pass if execution fails
+        # Execute query once without retry loop for speed
         df = None
-        execution_error = None
-        for exec_attempt in range(2):
-            try:
-                df = pd.read_sql_query(final_sql, self.conn)
-                break
-            except Exception as e:
-                execution_error = str(e)
-                logger.error(f"SQL execution failed (attempt {exec_attempt + 1}): {execution_error}")
-                if exec_attempt == 1:
-                    return {
-                        "success": False,
-                        "error": f"Query execution failed: {execution_error}",
-                        "sql_query": final_sql,
-                        "question": question
-                    }
-                logger.info("Attempting to regenerate SQL using execution error feedback")
-                alias_summary = self._describe_query_aliases(final_sql)
-                repair_prompt = self._augment_prompt_with_error(
-                    context_prompt,
-                    final_sql,
-                    execution_error,
-                    alias_summary
-                )
-                try:
-                    regenerated_sql = self._generate_sql_with_retry(question, repair_prompt, metadata_str)
-                except Exception as regen_error:
-                    logger.error(f"SQL regeneration after execution failure failed: {regen_error}")
-                    return {
-                        "success": False,
-                        "error": f"Query execution failed: {execution_error}",
-                        "sql_query": final_sql,
-                        "question": question
-                    }
-                cleaned_sql = self._clean_sql(regenerated_sql)
-                cleaned_sql = self._remove_unwanted_limit(cleaned_sql, question)
-                final_sql = self._validate_and_fix_tables(cleaned_sql)
-                logger.info(f"Retry SQL after execution error: {final_sql}")
+        try:
+            df = pd.read_sql_query(final_sql, self.conn)
+        except Exception as e:
+            execution_error = str(e)
+            logger.error(f"SQL execution failed: {execution_error}")
+            return {
+                "success": False,
+                "error": f"Query execution failed: {execution_error}",
+                "sql_query": final_sql,
+                "question": question
+            }
         
         # Generate answer
         answer = self._generate_answer(question, df, final_sql)
@@ -824,8 +783,8 @@ Generate appropriate SQL query considering the conversation context."""
         
         return result
 
-    def _generate_sql_with_retry(self, question: str, context_prompt: str, metadata_str: str, max_retries: int = 2) -> str:
-        """Generate SQL with retry logic and fallback"""
+    def _generate_sql_with_retry(self, question: str, context_prompt: str, metadata_str: str, max_retries: int = 1) -> str:
+        """Generate SQL with minimal retries for speed"""
         for attempt in range(max_retries):
             try:
                 logger.info(f"SQL generation attempt {attempt + 1}/{max_retries}")
@@ -924,6 +883,9 @@ Generate appropriate SQL query considering the conversation context."""
                     else:
                         filtered_df = filtered_df[filtered_df[col_name] == col_value]
                     logger.info(f"Applied filter {col_name}={col_value}, remaining rows: {len(filtered_df)}")
+        
+        # Apply question-based filtering and data preparation
+        filtered_df = self._prepare_data_for_followup(question, filtered_df)
         
         # Analyze what visualization is requested
         viz_response = self._should_visualize(question, filtered_df)
@@ -1042,6 +1004,171 @@ Generate appropriate SQL query considering the conversation context."""
         
         return result
 
+    def _prepare_data_for_followup(self, question: str, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Prepare data for follow-up questions by applying filters and reshaping.
+        
+        This is a general-purpose method that:
+        1. Filters data based on values mentioned in the question
+        2. Reshapes data when changing chart types (e.g., for pie charts)
+        
+        Args:
+            question: The follow-up question from the user
+            df: The dataframe from the previous query
+            
+        Returns:
+            Prepared dataframe suitable for the requested visualization
+        """
+        # Step 1: Apply question-based filtering
+        filtered_df = self._apply_question_filters(question, df)
+        
+        # Step 2: Reshape data if needed for the requested chart type
+        reshaped_df = self._reshape_data_for_chart(question, filtered_df)
+        
+        return reshaped_df
+
+    def _apply_question_filters(self, question: str, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Extract filter values from the question and apply them to the dataframe.
+        
+        Scans the question for values that exist in any column of the dataframe
+        and filters to only rows matching those values.
+        
+        Args:
+            question: The user's question
+            df: The dataframe to filter
+            
+        Returns:
+            Filtered dataframe
+        """
+        q_lower = question.lower()
+        filtered_df = df.copy()
+        applied_filters = []
+        
+        # Check each string/categorical column for values mentioned in the question
+        for col in df.select_dtypes(include=['object', 'category']).columns:
+            unique_values = df[col].dropna().unique()
+            for val in unique_values:
+                val_str = str(val).lower().strip()
+                # Skip very short values to avoid false matches (e.g., 'a', 'in')
+                if len(val_str) < 3:
+                    continue
+                # Check if this value is mentioned in the question
+                # Use word boundary matching to avoid partial matches
+                if re.search(r'\b' + re.escape(val_str) + r'\b', q_lower):
+                    logger.info(f"Filtering by {col}='{val}' based on question content")
+                    filtered_df = filtered_df[filtered_df[col].astype(str).str.lower().str.strip() == val_str]
+                    applied_filters.append((col, val))
+                    break  # Only filter by first match per column
+        
+        # If filtering resulted in empty dataframe, return original
+        if filtered_df.empty and applied_filters:
+            logger.warning("Question-based filtering resulted in empty dataframe, using original")
+            return df
+        
+        if applied_filters:
+            logger.info(f"Applied {len(applied_filters)} filter(s) from question: {applied_filters}")
+            
+        return filtered_df
+
+    def _reshape_data_for_chart(self, question: str, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Reshape dataframe structure to match the requested chart type.
+        
+        Handles cases like:
+        - Converting wide format (separate columns) to long format for pie charts
+        - Aggregating data when switching from detailed to summary views
+        
+        Args:
+            question: The user's question
+            df: The dataframe to reshape
+            
+        Returns:
+            Reshaped dataframe
+        """
+        q_lower = question.lower()
+        
+        # Detect requested chart type
+        target_chart = None
+        if 'pie' in q_lower:
+            target_chart = 'pie'
+        elif 'bar' in q_lower:
+            target_chart = 'bar'
+        elif 'line' in q_lower:
+            target_chart = 'line'
+        
+        if target_chart == 'pie':
+            # Pie charts need name/value pairs
+            # Check if we have multiple numeric columns that should be combined
+            reshaped = self._reshape_for_pie_chart(df)
+            if reshaped is not None:
+                return reshaped
+        
+        return df
+
+    def _reshape_for_pie_chart(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
+        """
+        Reshape dataframe for pie chart visualization.
+        
+        Handles multiple common data patterns:
+        1. Multiple numeric columns (e.g., Male, Female) -> melt to name/value
+        2. Already has a single category + value column -> return as-is
+        3. Multiple rows with same categories -> aggregate
+        
+        Args:
+            df: The dataframe to reshape
+            
+        Returns:
+            Reshaped dataframe suitable for pie chart, or None if no reshape needed
+        """
+        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+        non_numeric_cols = df.select_dtypes(exclude=['number']).columns.tolist()
+        
+        # Case 1: Multiple numeric columns representing categories (e.g., Male, Female)
+        # These should be melted into name/value format
+        if len(numeric_cols) >= 2:
+            # Check if column names look like category values
+            category_like_cols = []
+            for col in numeric_cols:
+                col_lower = col.lower()
+                # Common patterns for columns that are actually categories
+                if any(keyword in col_lower for keyword in 
+                       ['male', 'female', 'gender', 'count', 'total', 'sum', 
+                        'yes', 'no', 'true', 'false', 'active', 'inactive']):
+                    category_like_cols.append(col)
+            
+            # If we have category-like numeric columns, melt them
+            if len(category_like_cols) >= 2 or (len(numeric_cols) == 2 and len(non_numeric_cols) <= 1):
+                # Sum up all rows for each numeric column
+                totals = {col: df[col].sum() for col in numeric_cols}
+                
+                # Create pie chart format
+                pie_df = pd.DataFrame([
+                    {'Category': col, 'Value': total}
+                    for col, total in totals.items()
+                    if total > 0  # Exclude zero values
+                ])
+                
+                if not pie_df.empty:
+                    logger.info(f"Reshaped {len(numeric_cols)} numeric columns for pie chart: {totals}")
+                    return pie_df
+        
+        # Case 2: Single numeric column with a category column - aggregate if multiple rows
+        if len(numeric_cols) == 1 and len(non_numeric_cols) >= 1:
+            value_col = numeric_cols[0]
+            # Find the best category column (prefer shorter unique values)
+            cat_col = non_numeric_cols[0]
+            
+            # If we have multiple rows, aggregate by category
+            if len(df) > 1:
+                aggregated = df.groupby(cat_col)[value_col].sum().reset_index()
+                aggregated.columns = ['Category', 'Value']
+                logger.info(f"Aggregated data by {cat_col} for pie chart")
+                return aggregated
+        
+        # Case 3: Already in correct format or can't be reshaped
+        return None
+
     def _handle_transformation(self, question: str, df: pd.DataFrame) -> Dict[str, Any]:
         """Handle transformation of existing data (filter, sort, calculate)"""
         
@@ -1115,22 +1242,25 @@ Example formats:
     def _process_with_existing_data(self, question: str, df: pd.DataFrame) -> Dict[str, Any]:
         """Process question using existing data without new query"""
         
-        # Generate answer based on existing data
-        answer = self._generate_answer(question, df, None)
+        # Apply question-based filtering and data preparation
+        prepared_df = self._prepare_data_for_followup(question, df)
+        
+        # Generate answer based on prepared data
+        answer = self._generate_answer(question, prepared_df, None)
         # Determine if visualization is needed
-        viz_response = self._should_visualize(question, df)
+        viz_response = self._should_visualize(question, prepared_df)
         
         result = {
             "success": True,
             "question": question,
             "sql_query": None,
             "answer": answer,
-            "data": df,
+            "data": prepared_df,
             "visualization": None
         }
         
         if viz_response.should_visualize:
-            chart = self._create_visualization(df, viz_response)
+            chart = self._create_visualization(prepared_df, viz_response)
             result["visualization"] = {
                 "chart": chart,
                 "type": viz_response.primary_chart,
@@ -1209,13 +1339,23 @@ Example formats:
             ))
 
     
-    def _retrieve_metadata(self, question: str, top_k: int = 5) -> str:
-        """Retrieve relevant metadata from vector database"""
+    def _retrieve_metadata(self, question: str, top_k: int = 3) -> str:
+        """Retrieve relevant metadata from vector database with caching"""
+        
+        # Use cached metadata if available (simple keyword matching)
+        cache_key = frozenset(question.lower().split()[:5])  # First 5 words as key
+        if cache_key in self._metadata_cache:
+            logger.info("Using cached metadata")
+            return self._metadata_cache[cache_key]
+        
         try:
             if hasattr(self, 'table_collection') and self.table_collection:
-                # Query vector database for relevant table metadata
+                # Generate embedding using Ollama (768-dim for nomic-embed-text)
+                query_embedding = self._get_embedding(question)
+                
+                # Query vector database using embedding 
                 results = self.table_collection.query(
-                    query_texts=[question],
+                    query_embeddings=[query_embedding],
                     n_results=min(top_k, self.table_collection.count())
                 )
                 
@@ -1229,7 +1369,9 @@ Example formats:
                     table_info = f"Table: {metadata.get('table_name', 'Unknown')}"
                     metadata_parts.append(f"{table_info}\n{doc}")
                 
-                return "\n\n".join(metadata_parts)
+                result = "\n\n".join(metadata_parts)
+                self._metadata_cache[cache_key] = result  # Cache it
+                return result
             else:
                 logger.warning("Vector database not available, using basic schema")
                 return "Use available database schema"
@@ -1819,17 +1961,36 @@ Example formats:
         data_summary = f"Found {len(df)} rows"
         if len(df) > 0:
             data_summary += f" with columns: {', '.join(df.columns.tolist())}"
-        
-        answer_prompt = f"""Question: {question}
 
-Data summary: {data_summary}
+        # Provide a larger sample when results are small to enable accurate summaries.
+        sample_df = df if len(df) <= 30 else df.head(10)
+        sample_data = sample_df.to_string(index=False)
+        column_types = ", ".join([f"{col}({str(dtype)})" for col, dtype in df.dtypes.items()])
 
-Sample data:
-{df.head(10).to_string()}
+        answer_prompt = f"""You are a careful data analyst. Answer using ONLY the data shown below.
+    Do NOT mention charts/plots/graphs/visualizations. Do NOT apologize about not plotting. The system renders visuals separately.
 
-Provide a clear, concise answer to the question based on this data. 
-Focus on key insights and patterns.
-Be specific with numbers when relevant."""
+    Question:
+    {question}
+
+    Data summary:
+    {data_summary}
+
+    Columns (name(type)):
+    {column_types}
+
+    Sample data (may be truncated):
+    {sample_data}
+
+    Answer format requirements:
+    1) Start with a direct 1–2 sentence answer.
+    2) Then provide 3–6 bullets with the most important quantitative findings.
+       - Include totals, counts, and percentages/shares when applicable.
+       - For categorical breakdowns (e.g., gender/category/region), list each group with its value and its share of the total.
+       - Call out the top group and the gap vs the next group when relevant.
+    3) If the provided rows are insufficient to compute an exact metric (e.g., sample is truncated), say so explicitly and avoid guessing.
+    4) Plain text only. No SQL. No Python.
+    """
 
         try:
             response = self.llm.invoke(answer_prompt)
@@ -1870,7 +2031,7 @@ Be specific with numbers when relevant."""
                 visualization_rationale="No visualization requested"
             )
         
-        # Try LLM-based recommendation
+        # Use LLM-based recommendation for accurate chart type detection
         try:
             parser = PydanticOutputParser(pydantic_object=VisualizationResponse)
             
@@ -1884,7 +2045,7 @@ Data info:
 - Numeric columns: {', '.join(df.select_dtypes(include=['number']).columns.tolist())}
 
 Sample data:
-{df.head().to_string()}
+{df.head(5).to_string()}
 
 {parser.get_format_instructions()}
 
@@ -2022,10 +2183,69 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
         
         try:
             import plotly.express as px
+            from pandas.api.types import is_numeric_dtype
             
             chart_type = viz_response.primary_chart.lower()
             title = viz_response.title or "Data Visualization"
             default_cat, default_num = self._select_default_columns(df)
+
+            def infer_range_category_order(values: pd.Series) -> Optional[List[str]]:
+                """Infer a logical ordering for categories like '<20', '20-30', '60+' etc."""
+                try:
+                    if values is None or len(values) == 0:
+                        return None
+                    if is_numeric_dtype(values):
+                        return None
+
+                    uniques = [str(v).strip() for v in pd.unique(values.dropna())]
+                    if len(uniques) < 2:
+                        return None
+
+                    parsed: List[Tuple[float, float, str]] = []
+                    unknown: List[str] = []
+
+                    re_between = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\s*$")
+                    re_plus = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*\+\s*$")
+                    re_less = re.compile(r"^\s*(?:<|<=|less\s+than|under)\s*(\d+(?:\.\d+)?)\s*$", re.IGNORECASE)
+                    re_ge = re.compile(r"^\s*(?:>=|at\s+least)\s*(\d+(?:\.\d+)?)\s*$", re.IGNORECASE)
+
+                    for label in uniques:
+                        m = re_less.match(label)
+                        if m:
+                            upper = float(m.group(1))
+                            parsed.append((-1.0e18, upper, label))
+                            continue
+                        m = re_between.match(label)
+                        if m:
+                            lo = float(m.group(1))
+                            hi = float(m.group(2))
+                            parsed.append((lo, hi, label))
+                            continue
+                        m = re_plus.match(label)
+                        if m:
+                            lo = float(m.group(1))
+                            parsed.append((lo, 1.0e18, label))
+                            continue
+                        m = re_ge.match(label)
+                        if m:
+                            lo = float(m.group(1))
+                            parsed.append((lo, 1.0e18, label))
+                            continue
+                        unknown.append(label)
+
+                    # Only apply custom ordering if we successfully parsed most categories
+                    if len(parsed) < 2:
+                        return None
+
+                    parsed_sorted = sorted(parsed, key=lambda t: (t[0], t[1]))
+                    ordered = [t[2] for t in parsed_sorted]
+                    # Append unknown categories at the end, preserving their original order
+                    for label in uniques:
+                        if label in unknown and label not in ordered:
+                            ordered.append(label)
+                    return ordered
+                except Exception:
+                    return None
 
             def normalize_axis(axis_value, prefer_numeric=False, allow_multiple=False):
                 if axis_value is None:
@@ -2068,6 +2288,33 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
                     y_axis = default_num
                     if chart_type != "pie" and y_axis is None and len(df.columns) > 1:
                         y_axis = df.columns[1]
+            
+            # Check if we have NO numeric columns at all - need to compute counts
+            numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+            needs_count_aggregation = len(numeric_cols) == 0 and len(df.columns) >= 2
+            
+            if needs_count_aggregation:
+                # All columns are categorical - compute counts for visualization
+                cat_cols = df.columns.tolist()
+                if len(cat_cols) >= 2:
+                    # Use first column as x-axis, second as color/grouping, compute counts
+                    x_col = cat_cols[0]
+                    color_col = cat_cols[1] if len(cat_cols) > 1 else None
+                    
+                    # Aggregate to get counts
+                    if color_col:
+                        df_counts = df.groupby([x_col, color_col]).size().reset_index(name='count')
+                        logger.info(f"Computed counts for categorical data: {x_col} by {color_col}")
+                    else:
+                        df_counts = df.groupby(x_col).size().reset_index(name='count')
+                        logger.info(f"Computed counts for categorical data: {x_col}")
+                    
+                    # Override df and axis settings for the chart
+                    df = df_counts
+                    x_axis = x_col
+                    y_axis = 'count'
+                    if color_col and not color_by:
+                        color_by = color_col
             
             if chart_type == "bar":
                 fig = px.bar(
@@ -2124,10 +2371,14 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
                 )
             
             elif chart_type == "pie":
+                # Safely select top 10 rows for pie chart
+                df_pie = df.copy()
                 if len(df) > 10:
-                    df_pie = df.nlargest(10, y_axis) if y_axis else df.head(10)
-                else:
-                    df_pie = df
+                    # Only use nlargest if y_axis is a valid numeric column
+                    if y_axis and y_axis in df.columns and is_numeric_dtype(df[y_axis]):
+                        df_pie = df.nlargest(10, y_axis)
+                    else:
+                        df_pie = df.head(10)
                 
                 fig = px.pie(
                     df_pie,
@@ -2158,11 +2409,38 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
                 )
             
             elif chart_type == "histogram":
-                fig = px.histogram(
-                    df,
-                    x=x_axis,
-                    title=title
-                )
+                x_col = x_axis
+                y_col: Optional[str] = None
+                if isinstance(y_axis, list):
+                    y_col = y_axis[0] if y_axis else None
+                else:
+                    y_col = y_axis
+
+                # If x is categorical (like age ranges) OR y is provided (already aggregated),
+                # render a bar chart instead of a numeric histogram.
+                if x_col and x_col in df.columns and (not is_numeric_dtype(df[x_col]) or y_col):
+                    if y_col and y_col in df.columns and is_numeric_dtype(df[y_col]):
+                        fig = px.bar(df, x=x_col, y=y_col, title=title)
+                    else:
+                        # No usable y column; compute frequency counts
+                        counts_df = (
+                            df[x_col]
+                            .astype(str)
+                            .value_counts(dropna=False)
+                            .rename_axis(x_col)
+                            .reset_index(name="count")
+                        )
+                        fig = px.bar(counts_df, x=x_col, y="count", title=title)
+
+                    order = infer_range_category_order(df[x_col])
+                    if order:
+                        fig.update_xaxes(categoryorder='array', categoryarray=order)
+                else:
+                    fig = px.histogram(
+                        df,
+                        x=x_col,
+                        title=title
+                    )
             
             elif chart_type == "box":
                 x_col = x_axis
@@ -2197,6 +2475,12 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
                     y=y_axis,
                     title=title
                 )
+
+            # Apply natural ordering for range-like categorical x axes where possible
+            if x_axis and x_axis in df.columns:
+                order = infer_range_category_order(df[x_axis])
+                if order:
+                    fig.update_xaxes(categoryorder='array', categoryarray=order)
             
             fig.update_layout(
                 template="plotly",

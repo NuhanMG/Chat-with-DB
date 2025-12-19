@@ -19,7 +19,6 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Global State ---
 # Global instance of the QueryAgent
 agent: Optional[QueryAgentEnhanced] = None
 # Global instance of the ConversationState
@@ -323,8 +322,73 @@ def process_question(question: str, history: List):
 # --- UI Layout ---
 
 custom_css = """
-.sidebar { padding: 20px; border-right: 1px solid var(--border-color-primary); height: 100vh; overflow-y: auto; }
-.chat-area { padding: 20px; height: 100vh; overflow-y: auto; }
+/* 1. Force Full Screen & Remove Outer Margins */
+.gradio-container {
+    max-width: 100% !important;
+    width: 100% !important;
+    height: 100vh !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: hidden;
+}
+.contain {
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+.app {
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+/* 2. Main Row Layout */
+#main_row {
+    height: 100% !important;
+    gap: 0 !important;
+}
+
+/* 3. Sidebar Styling */
+#sidebar_col {
+    height: 100% !important;
+    padding: 15px !important;
+    border-right: 1px solid var(--border-color-primary);
+    display: flex !important;
+    flex-direction: column !important;
+}
+
+/* 4. Settings Section (Fixed at top) */
+#settings_area {
+    flex-shrink: 0 !important;
+}
+
+/* 5. Chat History List (Takes remaining space & scrolls) */
+#history_list {
+    flex-grow: 1 !important;
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    padding-right: 5px;
+    margin-top: 10px;
+}
+
+/* Thin scrollbar styling */
+#history_list::-webkit-scrollbar {
+    width: 6px;
+}
+#history_list::-webkit-scrollbar-thumb {
+    background-color: #4b5563;
+    border-radius: 4px;
+}
+#history_list::-webkit-scrollbar-track {
+    background-color: transparent;
+}
+
+/* Chat area */
+.chat-area { 
+    padding: 20px; 
+    height: 100vh; 
+    overflow-y: auto; 
+}
 .avatar-image { border-radius: 50%; }
 .message-row img { max-width: 100% !important; height: auto !important; border-radius: 8px; border: 1px solid var(--border-color-primary); margin-top: 10px; }
 .message-wrap { white-space: pre-wrap !important; word-break: break-word !important; overflow-wrap: break-word !important; max-width: 100%; }
@@ -337,31 +401,47 @@ custom_css = """
 footer { visibility: hidden; }
 """
 
-with gr.Blocks(title="Data Chat", css=custom_css, theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="Data Chat", css=custom_css, theme=gr.themes.Soft(), fill_height=True, fill_width=True) as demo:
     
-    with gr.Row(elem_classes="main-container"):
+    with gr.Row(elem_id="main_row"):
         
         # --- Sidebar ---
-        with gr.Column(scale=1, elem_classes="sidebar", min_width=300):
-            gr.Markdown("### 🗄️ Chat History")
-            with gr.Row():
-                new_chat_btn = gr.Button("+ New Chat", variant="primary", scale=3)
-                delete_btn = gr.Button("🗑️", variant="stop", scale=1, min_width=10)
+        with gr.Column(scale=1, min_width=300, elem_id="sidebar_col"):
+            # Settings at the top (fixed, not scrollable)
+            with gr.Column(elem_id="settings_area"):
+                with gr.Accordion("⚙️ Settings", open=False):
+                    db_input = gr.Textbox(label="Database Path", value="analysis.db")
+                    vec_input = gr.Textbox(label="Vector DB", value="./chroma_db_768dim")
+                    model_input = gr.Dropdown(
+                        label="Model", 
+                        choices=[
+                            "qwen2.5:7b", 
+                            "qwen2.5-coder:7b", 
+                            "llama3.2:3b", 
+                            "gemma3:4b", 
+                            "qwen2.5:3b", 
+                            "qwen3:8b", 
+                            "qwen3:4b", 
+                            "deepseek-r1:8b"
+                        ], 
+                        value="qwen2.5:7b"
+                    )
+                    init_btn = gr.Button("Initialize the LLM Agent")
+                    init_status = gr.Markdown("Not Connected")
+                
+                gr.Markdown("### 🗄️ Chat History")
+                with gr.Row():
+                    new_chat_btn = gr.Button("+ New Chat", variant="primary", scale=3)
+                    delete_btn = gr.Button("🗑️", variant="stop", scale=1, min_width=10)
             
-            history_list = gr.Radio(
-                label="Recent Conversations",
-                choices=get_conversation_list(),
-                interactive=True,
-                container=False
-            )
-            
-            gr.Markdown("---")
-            with gr.Accordion("⚙️ Settings", open=True):
-                db_input = gr.Textbox(label="Database Path", value="analysis.db")
-                vec_input = gr.Textbox(label="Vector DB", value="./chroma_db_768dim")
-                model_input = gr.Dropdown(label="Model", choices=["qwen2.5:7b", "llama3", "mistral"], value="qwen2.5:7b")
-                init_btn = gr.Button("Initialize the LLM Agent")
-                init_status = gr.Markdown("Not Connected")
+            # Chat history list (scrollable)
+            with gr.Column(elem_id="history_list"):
+                history_list = gr.Radio(
+                    label="Recent Conversations",
+                    choices=get_conversation_list(),
+                    interactive=True,
+                    container=False
+                )
 
         # --- Main Chat ---
         with gr.Column(scale=4, elem_classes="chat-area"):
