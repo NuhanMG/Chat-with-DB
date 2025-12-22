@@ -419,6 +419,7 @@ with gr.Blocks(title="Data Chat", css=custom_css, theme=gr.themes.Soft(), fill_h
                             "qwen2.5-coder:7b", 
                             "llama3.2:3b", 
                             "gemma3:4b", 
+                            "gemma3:1b",
                             "qwen2.5:3b", 
                             "qwen3:8b", 
                             "qwen3:4b", 

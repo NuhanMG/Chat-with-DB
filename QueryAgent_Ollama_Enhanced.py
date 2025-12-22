@@ -128,7 +128,7 @@ class QueryAgentEnhanced:
                 base_url=ollama_base_url,
                 temperature=temperature,
                 num_ctx=2048,  # Context window size 
-                num_predict=512, # Max tokens to generate 
+                num_predict=256, # Max tokens to generate 
                 repeat_penalty=1.1, # Penalty for repetition
                 timeout=60# Timeout in seconds
             )
