@@ -31,7 +31,6 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-
 class QuestionIntent(str, Enum):
     """Types of question intents"""
     NEW_QUERY = "new_query"
@@ -51,7 +50,6 @@ class VisualizationResponse(BaseModel):
     y_axis: Optional[str] = Field(default=None, description="Recommended Y-axis column")
     color_by: Optional[str] = Field(default=None, description="Column to color/group by")
     title: str = Field(default="", description="Chart title")
-
     visualization_rationale: str = Field(description="Why this visualization is recommended")
 
 
@@ -93,6 +91,8 @@ class QueryAgentEnhanced:
             ollama_base_url: URL of the Ollama API.
             embedding_model: Name of the embedding model to use.
         """
+        
+        
         self.source_db_path = source_db_path
         self.vector_db_path = vector_db_path
         self.llm_model = llm_model
@@ -101,36 +101,34 @@ class QueryAgentEnhanced:
         
         # Conversation management
         self.conversation_state = conversation_state or ConversationState()
-        self.max_context_messages = 10
+        self.max_context_messages = 10  
         self.max_data_contexts = max_data_contexts
         
         # Performance caches
         self._metadata_cache = {}
         self._ollama_connection_verified = False
         
-        # Connect to the SQLite database
+        # Initialize connections
         self.conn = sqlite3.connect(source_db_path, check_same_thread=False)
-        # Initialize LangChain SQLDatabase wrapper
         self.db = SQLDatabase.from_uri(f"sqlite:///{source_db_path}")
         
         # Initialize ChromaDB and vector database
         self._setup_vector_database()
         
-        # Load table and column metadata into memory for quick access
+        # Load metadata from vector database
         self.table_metadata = self._load_table_metadata()
         self.column_metadata = self._load_column_metadata()
         
-        # Initialize LLM with enhanced configuration
+        # Initialize LLM
         try:
-            # Initialize ChatOllama with specific parameters
             self.llm = ChatOllama(
                 model=llm_model,
                 base_url=ollama_base_url,
                 temperature=temperature,
-                num_ctx=2048,  # Context window size 
-                num_predict=256, # Max tokens to generate 
-                repeat_penalty=1.1, # Penalty for repetition
-                timeout=60# Timeout in seconds
+                num_ctx=4096,
+                num_predict=1024, # (sql + answer)
+                repeat_penalty=1.1,
+                timeout=120
             )
             logger.info(f"Successfully initialized Ollama with model: {llm_model}")
         except Exception as e:
@@ -141,7 +139,7 @@ class QueryAgentEnhanced:
         # Create SQL query chain
         self.query_chain = create_sql_query_chain(self.llm, self.db)
         
-        # Parser for visualization recommendations
+        # Initialize parsers
         self.viz_parser = PydanticOutputParser(pydantic_object=VisualizationResponse)
         
         logger.info(f"QueryAgentEnhanced initialized with model: {llm_model}")
@@ -154,11 +152,9 @@ class QueryAgentEnhanced:
             import requests
             logger.info(f"🔍 Requesting embedding from Ollama using model: {self.embedding_model}")
             
-            # Prepare payload for Ollama API
             payload = {"model": self.embedding_model, "prompt": text}
             logger.info(f"📤 Payload: model={self.embedding_model}")
             
-            # Make request to Ollama embeddings endpoint
             response = requests.post(
                 f"{self.ollama_base_url}/api/embeddings",
                 json=payload
@@ -181,8 +177,7 @@ class QueryAgentEnhanced:
             return embedding
         except Exception as e:
             logger.error(f"Failed to get embedding with model {self.embedding_model}: {e}")
-            # Return zero vector as fallback
-            return [0.0] * 768  # nomic-embed-text fallback
+            return [0.0] * 768  # nomic-embed-text fallback - zero vector
 
     def _setup_vector_database(self):
         """Initialize vector database connection"""
@@ -199,7 +194,7 @@ class QueryAgentEnhanced:
                 self.column_collection = None
                 return
             
-            # Initialize ChromaDB client
+            # Connect to ChromaDB
             self.chroma_client = chromadb.PersistentClient(
                 path=self.vector_db_path,
                 settings=Settings(anonymized_telemetry=False)
@@ -225,7 +220,6 @@ class QueryAgentEnhanced:
             return {}
         
         try:
-            # Retrieve all items from table collection
             results = self.table_collection.get()
             
             metadata = {}
@@ -337,14 +331,12 @@ class QueryAgentEnhanced:
     def _parse_with_fallback(self, response_text: str, parser, fallback_data: dict = None):
         """Parse LLM response with fallback mechanism for better JSON handling"""
         try:
-            # Try standard Pydantic parsing first
             return parser.parse(response_text)
         except Exception as e:
             logger.warning(f"Pydantic parsing failed: {e}")
             
             try:
                 import json
-                # Attempt to extract JSON from markdown code blocks
                 if "```json" in response_text:
                     json_str = response_text.split("```json")[1].split("```")[0].strip()
                 elif "```" in response_text:
@@ -352,13 +344,11 @@ class QueryAgentEnhanced:
                 else:
                     json_str = response_text.strip()
                 
-                # Parse JSON and validate against Pydantic model
                 parsed_json = json.loads(json_str)
                 return parser.pydantic_object(**parsed_json)
             except Exception as json_error:
                 logger.warning(f"JSON parsing also failed: {json_error}")
             
-            # Return fallback data if parsing fails completely
             if fallback_data:
                 logger.info("Using fallback data")
                 return fallback_data
@@ -417,7 +407,7 @@ class QueryAgentEnhanced:
         # Add data context information
         if self.conversation_state.data_contexts:
             latest_context = self.conversation_state.data_contexts[-1]
-            base_context.append("\nCurrent data context:")
+            base_context.append(f"\nCurrent data context:")
             base_context.append(f"  Columns available: {', '.join(latest_context.columns)}")
             base_context.append(f"  Row count: {latest_context.row_count}")
         
@@ -441,7 +431,6 @@ Generate appropriate SQL query considering the conversation context."""
         ]
         
         question_lower = question.lower()
-        # Check if any reference keyword is present in the question
         references_previous = any(keyword in question_lower for keyword in reference_keywords)
         
         if references_previous:
@@ -455,18 +444,15 @@ Generate appropriate SQL query considering the conversation context."""
 
     def _get_table_schema(self) -> Dict[str, List[Dict[str, str]]]:
         """Load table schema information from SQLite once and cache it"""
-        # Return cached schema if available
         if hasattr(self, "_table_schema_cache") and self._table_schema_cache:
             return self._table_schema_cache
         schema: Dict[str, List[Dict[str, str]]] = {}
         try:
             cursor = self.conn.cursor()
-            # Get list of all tables in the database
             tables = cursor.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             ).fetchall()
             for (table_name,) in tables:
-                # Get column information for each table
                 cols = cursor.execute(f"PRAGMA table_info('{table_name}')").fetchall()
                 schema[table_name] = [
                     {"name": col[1], "type": col[2] or ""}
@@ -487,13 +473,11 @@ Generate appropriate SQL query considering the conversation context."""
             idx = q_lower.find(col_lower)
             if idx != -1:
                 matches.append((col, idx))
-        # Sort matches by position in the question
         return sorted(matches, key=lambda item: item[1])
 
     def _maybe_handle_top_category_region_breakdown(self, question: str) -> Optional[Dict[str, Any]]:
         """General handler for "top dimension" requests followed by percentage breakdown by another dimension"""
         q_lower = question.lower()
-        # Check for keywords indicating percentage breakdown and top/winner logic
         percentage_terms = any(term in q_lower for term in ["percentage", "percent", "%"])
         winner_terms = any(term in q_lower for term in ["most", "highest", "top", "biggest", "largest", "winner"])
         if not (percentage_terms and winner_terms):
@@ -507,8 +491,6 @@ Generate appropriate SQL query considering the conversation context."""
         candidate_table = None
         candidate_columns: List[Dict[str, str]] = []
         best_match_count = 0
-        
-        # Identify the most relevant table based on column matches in the question
         for table_name, cols in schema.items():
             column_names = [col["name"] for col in cols]
             mentioned = self._find_columns_in_question(question, column_names)
@@ -527,8 +509,6 @@ Generate appropriate SQL query considering the conversation context."""
         mentioned_sorted = self._find_columns_in_question(question, column_names)
         categorical_candidates = []
         numeric_candidates = []
-        
-        # Separate mentioned columns into categorical and numeric
         for col in candidate_columns:
             col_type_lower = (col["type"] or "").lower()
             if any(ntype in col_type_lower for ntype in numeric_types):
@@ -542,15 +522,12 @@ Generate appropriate SQL query considering the conversation context."""
         if len(mentioned_cats) < 2:
             return None
 
-        # Determine the measure column (numeric)
         measure_column = mentioned_nums[0] if mentioned_nums else (numeric_candidates[0] if numeric_candidates else None)
         if not measure_column:
             return None
 
-        # Determine primary (top) and secondary (breakdown) dimensions
         primary_dim, secondary_dim = mentioned_cats[0], mentioned_cats[1]
 
-        # SQL to find the top category
         top_sql = (
             f"SELECT {primary_dim}, SUM({measure_column}) AS total_value "
             f"FROM {candidate_table} GROUP BY {primary_dim} "
@@ -562,8 +539,6 @@ Generate appropriate SQL query considering the conversation context."""
                 return None
             top_value = top_df.iloc[0][primary_dim]
             total_amount = float(top_df.iloc[0]["total_value"] or 0.0)
-            
-            # SQL to breakdown the top category by the secondary dimension
             breakdown_sql = (
                 f"SELECT {secondary_dim}, SUM({measure_column}) AS segment_total "
                 f"FROM {candidate_table} WHERE {primary_dim} = ? "
@@ -572,8 +547,6 @@ Generate appropriate SQL query considering the conversation context."""
             breakdown_df = pd.read_sql_query(breakdown_sql, self.conn, params=(top_value,))
             if breakdown_df.empty:
                 return None
-            
-            # Calculate percentages
             if total_amount > 0:
                 breakdown_df["percentage_of_total"] = (breakdown_df["segment_total"] / total_amount) * 100
             else:
@@ -582,7 +555,6 @@ Generate appropriate SQL query considering the conversation context."""
             ordered_cols = [primary_dim, secondary_dim, "segment_total", "percentage_of_total"]
             breakdown_df = breakdown_df[ordered_cols]
 
-            # Create visualization response
             viz_response = VisualizationResponse(
                 should_visualize=True,
                 chart_types=["bar"],
@@ -594,8 +566,6 @@ Generate appropriate SQL query considering the conversation context."""
                 visualization_rationale="Bar chart highlights each group's percentage contribution"
             )
             chart = self._create_visualization(breakdown_df, viz_response)
-            
-            # Generate text answer
             contribution_parts = [
                 f"{getattr(row, secondary_dim)}: {row.percentage_of_total:.1f}%"
                 for row in breakdown_df.itertuples()
@@ -610,7 +580,6 @@ Generate appropriate SQL query considering the conversation context."""
             combined_sql = (
                 f"{top_sql}\n\n-- Breakdown for {primary_dim}='{top_value}'\n{human_breakdown_sql}"
             )
-            
             result = {
                 "success": True,
                 "question": question,
@@ -709,7 +678,6 @@ Generate appropriate SQL query considering the conversation context."""
                 "question": question
             }
 
-        # Check for specialized top-dimension breakdown request
         specialized_result = self._maybe_handle_top_category_region_breakdown(question)
         if specialized_result:
             return specialized_result
@@ -746,19 +714,45 @@ Generate appropriate SQL query considering the conversation context."""
         
         logger.info(f"Generated SQL: {final_sql}")
         
-        # Execute query once without retry loop for speed
+        # Execute query with one automatic regeneration pass if execution fails
         df = None
-        try:
-            df = pd.read_sql_query(final_sql, self.conn)
-        except Exception as e:
-            execution_error = str(e)
-            logger.error(f"SQL execution failed: {execution_error}")
-            return {
-                "success": False,
-                "error": f"Query execution failed: {execution_error}",
-                "sql_query": final_sql,
-                "question": question
-            }
+        execution_error = None
+        for exec_attempt in range(2):
+            try:
+                df = pd.read_sql_query(final_sql, self.conn)
+                break
+            except Exception as e:
+                execution_error = str(e)
+                logger.error(f"SQL execution failed (attempt {exec_attempt + 1}): {execution_error}")
+                if exec_attempt == 1:
+                    return {
+                        "success": False,
+                        "error": f"Query execution failed: {execution_error}",
+                        "sql_query": final_sql,
+                        "question": question
+                    }
+                logger.info("Attempting to regenerate SQL using execution error feedback")
+                alias_summary = self._describe_query_aliases(final_sql)
+                repair_prompt = self._augment_prompt_with_error(
+                    context_prompt,
+                    final_sql,
+                    execution_error,
+                    alias_summary
+                )
+                try:
+                    regenerated_sql = self._generate_sql_with_retry(question, repair_prompt, metadata_str)
+                except Exception as regen_error:
+                    logger.error(f"SQL regeneration after execution failure failed: {regen_error}")
+                    return {
+                        "success": False,
+                        "error": f"Query execution failed: {execution_error}",
+                        "sql_query": final_sql,
+                        "question": question
+                    }
+                cleaned_sql = self._clean_sql(regenerated_sql)
+                cleaned_sql = self._remove_unwanted_limit(cleaned_sql, question)
+                final_sql = self._validate_and_fix_tables(cleaned_sql)
+                logger.info(f"Retry SQL after execution error: {final_sql}")
         
         # Generate answer
         answer = self._generate_answer(question, df, final_sql)
@@ -783,29 +777,52 @@ Generate appropriate SQL query considering the conversation context."""
         
         return result
 
-    def _generate_sql_with_retry(self, question: str, context_prompt: str, metadata_str: str, max_retries: int = 1) -> str:
-        """Generate SQL with minimal retries for speed"""
+    def _generate_sql_with_retry(self, question: str, context_prompt: str, metadata_str: str, max_retries: int = 3) -> str:
+        """Generate SQL with retries for robustness"""
+        last_error = None
+        
         for attempt in range(max_retries):
             try:
                 logger.info(f"SQL generation attempt {attempt + 1}/{max_retries}")
                 
                 # Combine metadata and context prompt
                 full_prompt = f"{metadata_str}\n\n{context_prompt}"
+                
+                # For retries, simplify the prompt to avoid confusion
+                if attempt > 0:
+                    # Simplified prompt for retry
+                    full_prompt = f"""Generate a valid SQLite query for the following question.
+Return ONLY the SQL query, nothing else.
+
+Question: {question}
+
+Available tables and columns:
+{metadata_str}"""
+                
                 # Invoke the query chain to generate SQL
                 sql_query = self.query_chain.invoke({"question": full_prompt})
                 
                 if sql_query and len(sql_query.strip()) > 0:
-                    return sql_query
+                    # Pre-validate the response before returning
+                    cleaned = self._clean_sql(sql_query)
+                    if cleaned and re.match(r"(?i)^(SELECT|WITH)\b", cleaned):
+                        return sql_query
+                    else:
+                        logger.warning(f"Generated SQL failed validation on attempt {attempt + 1}")
+                        last_error = "Generated response did not contain valid SQL"
                 else:
                     logger.warning(f"Empty SQL generated on attempt {attempt + 1}")
+                    last_error = "Empty SQL response"
                     
             except Exception as e:
                 logger.error(f"SQL generation attempt {attempt + 1} failed: {e}")
+                last_error = str(e)
                 if attempt == max_retries - 1:
                     raise
         
-        raise Exception("Failed to generate SQL after all retries")
-
+        raise Exception(f"Failed to generate SQL after all retries: {last_error}")
+    
+    
     def _augment_prompt_with_error(
         self,
         base_prompt: str,
@@ -814,13 +831,11 @@ Generate appropriate SQL query considering the conversation context."""
         alias_summary: Optional[str] = None
     ) -> str:
         """Provide execution error feedback to the LLM for regeneration"""
-        # Add hint about available aliases if provided
         alias_hint = (
             f"\nCurrent FROM/JOIN aliases: {alias_summary}."
             " Avoid referencing tables or aliases that are not listed unless you explicitly join them."
         ) if alias_summary else ""
 
-        # Construct prompt with error details
         return (
             f"{base_prompt}\n\n"
             f"Previous SQL attempt:\n{sql_query}\n\n"
@@ -834,14 +849,13 @@ Generate appropriate SQL query considering the conversation context."""
             if not sql_query:
                 return {}
             
-            # Regex to find the WHERE clause
             where_match = re.search(r'\bWHERE\s+(.+?)(?:\bGROUP\s+BY|\bORDER\s+BY|\bLIMIT|\)|$)', 
                                     sql_query, re.IGNORECASE | re.DOTALL)
             if where_match:
                 where_clause = where_match.group(1).strip()
                 conditions = {}
                 
-                # Parse simple equality conditions (e.g., col = 'val')
+                # Parse simple equality conditions 
                 for match in re.finditer(r'(\w+)\s*=\s*[\'"](.*?)[\'"]', where_clause):
                     col_name = match.group(1)
                     col_value = match.group(2)
@@ -863,7 +877,6 @@ Generate appropriate SQL query considering the conversation context."""
         previous_sql = None
         previous_filters = {}
         
-        # Look at recent messages to find the last SQL query
         recent_messages = self.conversation_state.get_recent_messages(2)
         for msg in reversed(recent_messages):
             if msg.role == "assistant" and msg.sql_query:
@@ -884,106 +897,15 @@ Generate appropriate SQL query considering the conversation context."""
                         filtered_df = filtered_df[filtered_df[col_name] == col_value]
                     logger.info(f"Applied filter {col_name}={col_value}, remaining rows: {len(filtered_df)}")
         
-        # Apply question-based filtering and data preparation
-        filtered_df = self._prepare_data_for_followup(question, filtered_df)
-        
         # Analyze what visualization is requested
         viz_response = self._should_visualize(question, filtered_df)
-
-        # Build insight summary from available numeric columns
-        insight_text = ""
-        try:
-            if not filtered_df.empty:
-                # Attempt to find a suitable measure column
-                measure_col = None
-                preferred_measures = [
-                    "total_sales", "sales", "total_amount", "amount", "value", "metric"
-                ]
-                for candidate in preferred_measures:
-                    if candidate in filtered_df.columns:
-                        measure_col = candidate
-                        break
-                if not measure_col:
-                    numeric_cols = filtered_df.select_dtypes(include=["number"]).columns.tolist()
-                    if numeric_cols:
-                        measure_col = numeric_cols[0]
-
-                # Attempt to find a suitable category column
-                category_col = None
-                for candidate in ["category", "segment", "product", "group"]:
-                    if candidate in filtered_df.columns:
-                        category_col = candidate
-                        break
-
-                # Attempt to find a suitable region column
-                region_col = None
-                for candidate in ["region", "area", "market", "location"]:
-                    if candidate in filtered_df.columns:
-                        region_col = candidate
-                        break
-
-                # Generate insight text if columns are found
-                if measure_col and category_col:
-                    category_totals = (
-                        filtered_df.groupby(category_col)[measure_col]
-                        .sum()
-                        .sort_values(ascending=False)
-                    )
-                    if not category_totals.empty:
-                        top_category = category_totals.index[0]
-                        top_total = category_totals.iloc[0]
-                        formatted_total = f"{float(top_total):,.2f}"
-                        insight_parts = [
-                            f"{category_col.capitalize()} '{top_category}' leads with {formatted_total} {measure_col.replace('_', ' ')}."
-                        ]
-
-                        if region_col:
-                            region_breakdown = (
-                                filtered_df[filtered_df[category_col] == top_category]
-                                .groupby(region_col)[measure_col]
-                                .sum()
-                                .sort_values(ascending=False)
-                            )
-                            if not region_breakdown.empty and float(top_total) != 0:
-                                breakdown_strings = [
-                                    f"{idx}: {float(val):,.2f} ({(float(val)/float(top_total))*100:.1f}%)"
-                                    for idx, val in region_breakdown.items()
-                                ]
-                                insight_parts.append(
-                                    "Regional contribution — " + ", ".join(breakdown_strings)
-                                )
-
-                        insight_text = " ".join(insight_parts)
-        except Exception as insight_error:
-            logger.debug(f"Insight generation skipped: {insight_error}")
-
-        # Ask LLM for additional narrative based on filtered data
-        llm_answer = ""
-        try:
-            llm_answer = self._generate_answer(question, filtered_df, previous_sql)
-        except Exception as llm_error:
-            logger.debug(f"LLM answer generation skipped: {llm_error}")
-
-        # Compose final answer text
-        answer_parts: List[str] = []
-        if insight_text:
-            answer_parts.append(insight_text)
-        if llm_answer and llm_answer.strip():
-            answer_parts.append(llm_answer.strip())
+        
+        # Generate new answer focusing on visualization
+        if previous_filters:
+            filter_desc = ", ".join([f"{k}='{v}'" for k, v in previous_filters.items()])
+            answer = f"I've created a {viz_response.primary_chart} visualization of the filtered data ({filter_desc}). {viz_response.visualization_rationale}"
         else:
-            if previous_filters:
-                filter_desc = ", ".join([f"{k}='{v}'" for k, v in previous_filters.items()])
-                answer_parts.append(
-                    f"I've created a {viz_response.primary_chart} visualization of the filtered data ({filter_desc}). {viz_response.visualization_rationale}"
-                )
-            else:
-                answer_parts.append(
-                    f"I've created a {viz_response.primary_chart} visualization of the previous data. {viz_response.visualization_rationale}"
-                )
-
-        answer = "\n\n".join(part.strip() for part in answer_parts if part).strip()
-        if not answer:
-            answer = f"I've created a {viz_response.primary_chart} visualization highlighting the latest results."
+            answer = f"I've created a {viz_response.primary_chart} visualization of the previous data. {viz_response.visualization_rationale}"
         
         result = {
             "success": True,
@@ -1004,177 +926,12 @@ Generate appropriate SQL query considering the conversation context."""
         
         return result
 
-    def _prepare_data_for_followup(self, question: str, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Prepare data for follow-up questions by applying filters and reshaping.
-        
-        This is a general-purpose method that:
-        1. Filters data based on values mentioned in the question
-        2. Reshapes data when changing chart types (e.g., for pie charts)
-        
-        Args:
-            question: The follow-up question from the user
-            df: The dataframe from the previous query
-            
-        Returns:
-            Prepared dataframe suitable for the requested visualization
-        """
-        # Step 1: Apply question-based filtering
-        filtered_df = self._apply_question_filters(question, df)
-        
-        # Step 2: Reshape data if needed for the requested chart type
-        reshaped_df = self._reshape_data_for_chart(question, filtered_df)
-        
-        return reshaped_df
-
-    def _apply_question_filters(self, question: str, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Extract filter values from the question and apply them to the dataframe.
-        
-        Scans the question for values that exist in any column of the dataframe
-        and filters to only rows matching those values.
-        
-        Args:
-            question: The user's question
-            df: The dataframe to filter
-            
-        Returns:
-            Filtered dataframe
-        """
-        q_lower = question.lower()
-        filtered_df = df.copy()
-        applied_filters = []
-        
-        # Check each string/categorical column for values mentioned in the question
-        for col in df.select_dtypes(include=['object', 'category']).columns:
-            unique_values = df[col].dropna().unique()
-            for val in unique_values:
-                val_str = str(val).lower().strip()
-                # Skip very short values to avoid false matches (e.g., 'a', 'in')
-                if len(val_str) < 3:
-                    continue
-                # Check if this value is mentioned in the question
-                # Use word boundary matching to avoid partial matches
-                if re.search(r'\b' + re.escape(val_str) + r'\b', q_lower):
-                    logger.info(f"Filtering by {col}='{val}' based on question content")
-                    filtered_df = filtered_df[filtered_df[col].astype(str).str.lower().str.strip() == val_str]
-                    applied_filters.append((col, val))
-                    break  # Only filter by first match per column
-        
-        # If filtering resulted in empty dataframe, return original
-        if filtered_df.empty and applied_filters:
-            logger.warning("Question-based filtering resulted in empty dataframe, using original")
-            return df
-        
-        if applied_filters:
-            logger.info(f"Applied {len(applied_filters)} filter(s) from question: {applied_filters}")
-            
-        return filtered_df
-
-    def _reshape_data_for_chart(self, question: str, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Reshape dataframe structure to match the requested chart type.
-        
-        Handles cases like:
-        - Converting wide format (separate columns) to long format for pie charts
-        - Aggregating data when switching from detailed to summary views
-        
-        Args:
-            question: The user's question
-            df: The dataframe to reshape
-            
-        Returns:
-            Reshaped dataframe
-        """
-        q_lower = question.lower()
-        
-        # Detect requested chart type
-        target_chart = None
-        if 'pie' in q_lower:
-            target_chart = 'pie'
-        elif 'bar' in q_lower:
-            target_chart = 'bar'
-        elif 'line' in q_lower:
-            target_chart = 'line'
-        
-        if target_chart == 'pie':
-            # Pie charts need name/value pairs
-            # Check if we have multiple numeric columns that should be combined
-            reshaped = self._reshape_for_pie_chart(df)
-            if reshaped is not None:
-                return reshaped
-        
-        return df
-
-    def _reshape_for_pie_chart(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
-        """
-        Reshape dataframe for pie chart visualization.
-        
-        Handles multiple common data patterns:
-        1. Multiple numeric columns (e.g., Male, Female) -> melt to name/value
-        2. Already has a single category + value column -> return as-is
-        3. Multiple rows with same categories -> aggregate
-        
-        Args:
-            df: The dataframe to reshape
-            
-        Returns:
-            Reshaped dataframe suitable for pie chart, or None if no reshape needed
-        """
-        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-        non_numeric_cols = df.select_dtypes(exclude=['number']).columns.tolist()
-        
-        # Case 1: Multiple numeric columns representing categories (e.g., Male, Female)
-        # These should be melted into name/value format
-        if len(numeric_cols) >= 2:
-            # Check if column names look like category values
-            category_like_cols = []
-            for col in numeric_cols:
-                col_lower = col.lower()
-                # Common patterns for columns that are actually categories
-                if any(keyword in col_lower for keyword in 
-                       ['male', 'female', 'gender', 'count', 'total', 'sum', 
-                        'yes', 'no', 'true', 'false', 'active', 'inactive']):
-                    category_like_cols.append(col)
-            
-            # If we have category-like numeric columns, melt them
-            if len(category_like_cols) >= 2 or (len(numeric_cols) == 2 and len(non_numeric_cols) <= 1):
-                # Sum up all rows for each numeric column
-                totals = {col: df[col].sum() for col in numeric_cols}
-                
-                # Create pie chart format
-                pie_df = pd.DataFrame([
-                    {'Category': col, 'Value': total}
-                    for col, total in totals.items()
-                    if total > 0  # Exclude zero values
-                ])
-                
-                if not pie_df.empty:
-                    logger.info(f"Reshaped {len(numeric_cols)} numeric columns for pie chart: {totals}")
-                    return pie_df
-        
-        # Case 2: Single numeric column with a category column - aggregate if multiple rows
-        if len(numeric_cols) == 1 and len(non_numeric_cols) >= 1:
-            value_col = numeric_cols[0]
-            # Find the best category column (prefer shorter unique values)
-            cat_col = non_numeric_cols[0]
-            
-            # If we have multiple rows, aggregate by category
-            if len(df) > 1:
-                aggregated = df.groupby(cat_col)[value_col].sum().reset_index()
-                aggregated.columns = ['Category', 'Value']
-                logger.info(f"Aggregated data by {cat_col} for pie chart")
-                return aggregated
-        
-        # Case 3: Already in correct format or can't be reshaped
-        return None
-
     def _handle_transformation(self, question: str, df: pd.DataFrame) -> Dict[str, Any]:
         """Handle transformation of existing data (filter, sort, calculate)"""
         
         logger.info("Handling data transformation request")
         
-        # Use LLM to determine transformation code
+        # Use LLM to determine transformation
         transform_prompt = f"""Given this DataFrame with columns: {list(df.columns)}
 
 User request: "{question}"
@@ -1242,25 +999,20 @@ Example formats:
     def _process_with_existing_data(self, question: str, df: pd.DataFrame) -> Dict[str, Any]:
         """Process question using existing data without new query"""
         
-        # Apply question-based filtering and data preparation
-        prepared_df = self._prepare_data_for_followup(question, df)
-        
-        # Generate answer based on prepared data
-        answer = self._generate_answer(question, prepared_df, None)
-        # Determine if visualization is needed
-        viz_response = self._should_visualize(question, prepared_df)
+        answer = self._generate_answer(question, df, None)
+        viz_response = self._should_visualize(question, df)
         
         result = {
             "success": True,
             "question": question,
             "sql_query": None,
             "answer": answer,
-            "data": prepared_df,
+            "data": df,
             "visualization": None
         }
         
         if viz_response.should_visualize:
-            chart = self._create_visualization(prepared_df, viz_response)
+            chart = self._create_visualization(df, viz_response)
             result["visualization"] = {
                 "chart": chart,
                 "type": viz_response.primary_chart,
@@ -1277,24 +1029,23 @@ Example formats:
     ):
         """Update conversation state with new interaction"""
         
-        # Add user message to history
+        # Add user message
         self.conversation_state.add_message(Message(
             role="user",
             content=question,
             metadata={"intent": intent.intent}
         ))
         
-        # Prepare dataframe snapshot for assistant message
+        # Add assistant message
         df_snapshot = None
         if result.get("data") is not None:
             df = result["data"]
             df_snapshot = {
                 "columns": list(df.columns),
                 "row_count": len(df),
-                "sample": df.head(50).to_dict() if len(df) > 0 else {}
+                "sample": df.head(3).to_dict() if len(df) > 0 else {}
             }
         
-        # Prepare visualization info for assistant message
         viz_info = None
         figure_json = None
         if result.get("visualization"):
@@ -1306,7 +1057,6 @@ Example formats:
                 except Exception as e:
                     logger.warning(f"Failed to serialize figure to JSON: {e}")
         
-        # Add assistant message to history
         self.conversation_state.add_message(Message(
             role="assistant",
             content=result.get("answer", ""),
@@ -1330,7 +1080,7 @@ Example formats:
                 sample_data=df.head(5).to_dict() if len(df) > 0 else {}
             ))
         
-        # Add visualization record if a chart was created
+        # Add visualization record
         if result.get("visualization"):
             self.conversation_state.add_visualization(VisualizationRecord(
                 question=question,
@@ -1383,13 +1133,11 @@ Example formats:
         """Clean and extract SQL query from LLM response (basic version)"""
         sql_query = sql_query.strip()
         
-        # Remove markdown code blocks
         if "```sql" in sql_query:
             sql_query = sql_query.split("```sql")[1].split("```")[0].strip()
         elif "```" in sql_query:
             sql_query = sql_query.split("```")[1].split("```")[0].strip()
         
-        # Remove common prefixes
         sql_query = re.sub(r"^SQLQuery:\s*", "", sql_query, flags=re.IGNORECASE)
         sql_query = re.sub(r"^Answer:\s*", "", sql_query, flags=re.IGNORECASE)
         
@@ -1402,6 +1150,20 @@ Example formats:
         
         original = query
         q = query.strip()
+
+        # Early detection of malformed response (LLM echoing prompt)
+        # Check if response contains metadata/prompt text without valid SQL
+        malformed_indicators = [
+            "Table:", "Description:", "Business Context:", "Primary Key:",
+            "Data Quality:", "Row Count:", "Column Count:", "Context from conversation:"
+        ]
+        has_sql_keyword = bool(re.search(r'\b(SELECT|WITH)\b', q, re.IGNORECASE))
+        has_malformed_content = any(indicator in q for indicator in malformed_indicators)
+        
+        # If response looks like echoed prompt without SQL, return empty to trigger retry
+        if has_malformed_content and not has_sql_keyword:
+            logger.warning("LLM response appears to be echoed prompt text without SQL")
+            return ""
 
         # Remove markdown-style fences
         q = re.sub(r"```\w*", "", q)
@@ -1557,16 +1319,7 @@ Example formats:
         return query
 
     def _remove_unwanted_limit(self, query: str, original_question: str) -> str:
-        """
-        Remove LIMIT clause unless explicitly requested in the question.
-        
-        Args:
-            query (str): The SQL query to process.
-            original_question (str): The original natural language question.
-            
-        Returns:
-            str: The SQL query with unwanted LIMIT clauses removed.
-        """
+        """Remove LIMIT clause unless explicitly requested"""
         question_lower = original_question.lower()
         limit_keywords = ['top ', 'first ', 'limit ', 'maximum ', 'max ', 'bottom ', 'last ', 'lowest ']
         
@@ -1581,15 +1334,7 @@ Example formats:
         return query
 
     def _extract_main_query_section(self, sql_query: str) -> str:
-        """
-        Return the portion of the SQL that represents the main query (after CTEs).
-        
-        Args:
-            sql_query (str): The full SQL query.
-            
-        Returns:
-            str: The main query section.
-        """
+        """Return the portion of the SQL that represents the main query (after CTEs)"""
         stripped = sql_query.lstrip()
         lowered = stripped.lower()
         if not lowered.startswith("with"):
@@ -1616,19 +1361,7 @@ Example formats:
         return sql_query
 
     def _analyze_query_aliases(self, sql_query: str):
-        """
-        Extract alias metadata from the main query section.
-        
-        Args:
-            sql_query (str): The SQL query to analyze.
-            
-        Returns:
-            tuple: A tuple containing:
-                - valid_aliases (set): Set of valid alias names.
-                - base_to_alias (dict): Mapping from base table names to aliases.
-                - alias_to_table (dict): Mapping from aliases to table names.
-                - summary_text (str): A summary string of the aliases.
-        """
+        """Extract alias metadata from the main query section"""
         main_query_section = self._extract_main_query_section(sql_query)
         from_pattern = r"(?i)(?:FROM|JOIN)\s+([a-zA-Z_][\w]*)\s*(?:AS\s+)?([a-zA-Z_][\w]*)?"
 
@@ -1672,37 +1405,12 @@ Example formats:
         return valid_aliases, base_to_alias, alias_to_table, summary_text
 
     def _describe_query_aliases(self, sql_query: str) -> str:
-        """
-        Return a human-readable alias summary for prompts/logging.
-        
-        Args:
-            sql_query (str): The SQL query to describe.
-            
-        Returns:
-            str: A summary of the aliases used in the query.
-        """
+        """Return a human-readable alias summary for prompts/logging"""
         _, _, _, summary = self._analyze_query_aliases(sql_query)
         return summary
 
     def _validate_and_fix_tables(self, sql_query: str) -> str:
-        """
-        Validate table and column names in SQL query and fix if needed.
-        
-        This method performs comprehensive validation and fixing of the SQL query:
-        1. Checks if tables exist in the database.
-        2. Checks if columns exist in the tables.
-        3. Handles CTEs and subqueries.
-        4. Fixes invalid table references in JOINs.
-        5. Fixes invalid column references.
-        6. Fixes aggregate function references.
-        7. Fixes window function column references.
-        
-        Args:
-            sql_query (str): The SQL query to validate and fix.
-            
-        Returns:
-            str: The validated and fixed SQL query.
-        """
+        """Validate table and column names in SQL query and fix if needed"""
         
         cursor = self.conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
@@ -1870,17 +1578,7 @@ Example formats:
         return sql_query
 
     def _fix_aggregate_reference(self, match, invalid_tables, column_map):
-        """
-        Fix aggregate function references to invalid tables.
-        
-        Args:
-            match (re.Match): The regex match object.
-            invalid_tables (set): Set of invalid table names.
-            column_map (dict): Mapping of column names to (table, column) tuples.
-            
-        Returns:
-            str: The fixed aggregate function reference.
-        """
+        """Fix aggregate function references to invalid tables"""
         agg_func = match.group(1)
         full_ref = match.group(2)
         
@@ -1896,15 +1594,7 @@ Example formats:
         return match.group(0)
 
     def _cleanup_broken_clauses(self, sql_query: str) -> str:
-        """
-        Clean up SQL clauses after column/table removal.
-        
-        Args:
-            sql_query (str): The SQL query to clean up.
-            
-        Returns:
-            str: The cleaned SQL query.
-        """
+        """Clean up SQL clauses after column/table removal"""
         # Remove empty aggregate functions
         sql_query = re.sub(r'(SUM|AVG|COUNT|MIN|MAX|TOTAL)\s*\(\s*\)', 'NULL', sql_query, flags=re.IGNORECASE)
         
@@ -1943,17 +1633,7 @@ Example formats:
         df: pd.DataFrame,
         sql_query: Optional[str]
     ) -> str:
-        """
-        Generate natural language answer from results.
-        
-        Args:
-            question (str): The original question.
-            df (pd.DataFrame): The query results.
-            sql_query (Optional[str]): The executed SQL query.
-            
-        Returns:
-            str: The generated answer.
-        """
+        """Generate natural language answer from results"""
         
         if df.empty:
             return "No results found for your question."
@@ -1961,12 +1641,13 @@ Example formats:
         data_summary = f"Found {len(df)} rows"
         if len(df) > 0:
             data_summary += f" with columns: {', '.join(df.columns.tolist())}"
-
+        
         # Provide a larger sample when results are small to enable accurate summaries.
         sample_df = df if len(df) <= 30 else df.head(10)
         sample_data = sample_df.to_string(index=False)
         column_types = ", ".join([f"{col}({str(dtype)})" for col, dtype in df.dtypes.items()])
 
+        
         answer_prompt = f"""You are a careful data analyst. Answer using ONLY the data shown below.
     Do NOT mention charts/plots/graphs/visualizations. Do NOT apologize about not plotting. The system renders visuals separately.
 
@@ -1983,6 +1664,9 @@ Example formats:
     {sample_data}
 
     Answer format requirements:
+    Provide a clear, concise answer to the question based on this data. 
+    Focus on key insights and patterns.
+    Be specific with numbers when relevant.
     1) Start with a direct 1–2 sentence answer.
     2) Then provide 3–6 bullets with the most important quantitative findings.
        - Include totals, counts, and percentages/shares when applicable.
@@ -2000,16 +1684,7 @@ Example formats:
             return f"Query executed successfully. {data_summary}"
 
     def _should_visualize(self, question: str, df: pd.DataFrame) -> VisualizationResponse:
-        """
-        Determine if and how to visualize the results.
-        
-        Args:
-            question (str): The original question.
-            df (pd.DataFrame): The query results.
-            
-        Returns:
-            VisualizationResponse: The visualization recommendation.
-        """
+        """Determine if and how to visualize the results"""
         
         if df.empty or len(df) < 2:
             return VisualizationResponse(
@@ -2031,7 +1706,7 @@ Example formats:
                 visualization_rationale="No visualization requested"
             )
         
-        # Use LLM-based recommendation for accurate chart type detection
+        # Try LLM-based recommendation
         try:
             parser = PydanticOutputParser(pydantic_object=VisualizationResponse)
             
@@ -2065,16 +1740,7 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
             return self._simple_viz_recommendation(question, df)
 
     def _simple_viz_recommendation(self, question: str, result_df: pd.DataFrame) -> VisualizationResponse:
-        """
-        Simple rule-based visualization recommendation as fallback.
-        
-        Args:
-            question (str): The original question.
-            result_df (pd.DataFrame): The query results.
-            
-        Returns:
-            VisualizationResponse: The visualization recommendation.
-        """
+        """Simple rule-based visualization recommendation as fallback"""
         q_lower = question.lower()
         columns = list(result_df.columns)
         
@@ -2129,16 +1795,7 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
         )
 
     def _resolve_column_name(self, df: pd.DataFrame, column_name: Optional[str]) -> Optional[str]:
-        """
-        Resolve a column reference against dataframe columns (case/quote insensitive).
-        
-        Args:
-            df (pd.DataFrame): The dataframe to check against.
-            column_name (Optional[str]): The column name to resolve.
-            
-        Returns:
-            Optional[str]: The resolved column name or None.
-        """
+        """Resolve a column reference against dataframe columns (case/quote insensitive)"""
         if column_name is None:
             return None
         stripped = str(column_name).strip().strip('"`[]')
@@ -2150,15 +1807,7 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
         return columns_lower.get(stripped.lower())
 
     def _select_default_columns(self, df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
-        """
-        Return default categorical and numeric columns for visualization fallbacks.
-        
-        Args:
-            df (pd.DataFrame): The dataframe to analyze.
-            
-        Returns:
-            tuple: A tuple containing (default_categorical_column, default_numeric_column).
-        """
+        """Return default categorical and numeric columns for visualization fallbacks"""
         numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
         categorical_cols = [col for col in df.columns if col not in numeric_cols]
         default_cat = categorical_cols[0] if categorical_cols else (df.columns[0] if len(df.columns) > 0 else None)
@@ -2506,15 +2155,10 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
             return fig
         except Exception as e:
             logger.error(f"Error creating visualization: {e}")
-            return None
+            return None 
 
     def get_conversation_summary(self) -> Dict[str, Any]:
-        """
-        Get summary of current conversation.
-        
-        Returns:
-            Dict[str, Any]: A dictionary containing conversation statistics.
-        """
+        """Get summary of current conversation"""
         return {
             "conversation_id": self.conversation_state.conversation_id,
             "message_count": len(self.conversation_state.messages),
@@ -2524,12 +2168,7 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
         }
 
     def get_summary(self) -> Dict:
-        """
-        Get database and metadata summary.
-        
-        Returns:
-            Dict: A dictionary containing database and conversation summaries.
-        """
+        """Get database and metadata summary"""
         summary = {
             'tables': len(self.table_metadata),
             'conversation': self.get_conversation_summary(),
@@ -2548,16 +2187,11 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
         return summary
 
     def export_conversation(self) -> Dict[str, Any]:
-        """
-        Export conversation state.
-        
-        Returns:
-            Dict[str, Any]: The exported conversation state.
-        """
+        """Export conversation state"""
         return self.conversation_state.export_conversation()
 
     def close(self):
-        """Close database connection and release resources"""
+        """Close database connection"""
         if self.conn:
             self.conn.close()
-            logger.info("Database connection closed")
+        logger.info("Database connection closed")
