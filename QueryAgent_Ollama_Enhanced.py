@@ -8,6 +8,7 @@ import requests
 from enum import Enum
 
 import pandas as pd
+import dask.dataframe as dd
 import plotly.express as px
 import plotly.graph_objects as go
 
@@ -24,6 +25,14 @@ import chromadb
 from chromadb.config import Settings 
 
 from conversation_manager import ConversationState, Message, DataContext, VisualizationRecord
+from dataframe_factory import (
+    DataFrameFactory, 
+    UnifiedDataFrame, 
+    from_sql, 
+    to_pandas,
+    ensure_pandas,
+    get_backend_name
+)
 
 load_dotenv()
 
@@ -107,6 +116,10 @@ class QueryAgentEnhanced:
         # Performance caches
         self._metadata_cache = {}
         self._ollama_connection_verified = False
+        
+        # Store last DataFrame for multi-turn conversations (re-visualization, filtering)
+        self._last_dataframe = None
+        self._last_sql_query = None
         
         # Initialize connections
         self.conn = sqlite3.connect(source_db_path, check_same_thread=False)
@@ -427,17 +440,23 @@ Generate appropriate SQL query considering the conversation context."""
         
         reference_keywords = [
             "that", "this", "these", "those", "previous", "last", 
-            "earlier", "above", "same", "it", "them"
+            "earlier", "above", "same", "it", "them", "from", "the graph",
+            "the chart", "the data", "the result"
         ]
         
         question_lower = question.lower()
         references_previous = any(keyword in question_lower for keyword in reference_keywords)
         
         if references_previous:
-            # Try to get the latest dataframe
+            # First try to use the stored DataFrame (most reliable)
+            if self._last_dataframe is not None:
+                logger.info("Found reference to previous data, reusing stored DataFrame")
+                return True, self._last_dataframe
+            
+            # Fallback to conversation state
             latest_df = self.conversation_state.get_latest_dataframe()
             if latest_df is not None:
-                logger.info("Found reference to previous data, reusing DataFrame")
+                logger.info("Found reference to previous data, reusing DataFrame from conversation state")
                 return True, latest_df
         
         return False, None
@@ -534,8 +553,8 @@ Generate appropriate SQL query considering the conversation context."""
             f"ORDER BY total_value DESC LIMIT 1"
         )
         try:
-            top_df = pd.read_sql_query(top_sql, self.conn)
-            if top_df.empty:
+            top_df = from_sql(top_sql, self.conn, force_pandas=True)
+            if DataFrameFactory.empty_check(top_df):
                 return None
             top_value = top_df.iloc[0][primary_dim]
             total_amount = float(top_df.iloc[0]["total_value"] or 0.0)
@@ -544,8 +563,8 @@ Generate appropriate SQL query considering the conversation context."""
                 f"FROM {candidate_table} WHERE {primary_dim} = ? "
                 f"GROUP BY {secondary_dim} ORDER BY segment_total DESC"
             )
-            breakdown_df = pd.read_sql_query(breakdown_sql, self.conn, params=(top_value,))
-            if breakdown_df.empty:
+            breakdown_df = from_sql(breakdown_sql, self.conn, params=(top_value,), force_pandas=True)
+            if DataFrameFactory.empty_check(breakdown_df):
                 return None
             if total_amount > 0:
                 breakdown_df["percentage_of_total"] = (breakdown_df["segment_total"] / total_amount) * 100
@@ -719,7 +738,8 @@ Generate appropriate SQL query considering the conversation context."""
         execution_error = None
         for exec_attempt in range(2):
             try:
-                df = pd.read_sql_query(final_sql, self.conn)
+                df = from_sql(final_sql, self.conn)
+                logger.info(f"Query executed successfully using {get_backend_name(df)} backend")
                 break
             except Exception as e:
                 execution_error = str(e)
@@ -774,6 +794,11 @@ Generate appropriate SQL query considering the conversation context."""
                 "type": viz_response.primary_chart,
                 "rationale": viz_response.visualization_rationale
             }
+        
+        # Store DataFrame for multi-turn conversations (re-visualization, filtering)
+        self._last_dataframe = df
+        self._last_sql_query = final_sql
+        logger.info(f"Stored DataFrame ({DataFrameFactory.get_length(df)} rows) for follow-up questions")
         
         return result
 
@@ -868,42 +893,52 @@ Available tables and columns:
             logger.error(f"Failed to extract filters from SQL: {e}")
             return {}
 
-    def _handle_revisualization(self, question: str, df: pd.DataFrame) -> Dict[str, Any]:
-        """Handle re-visualization of existing data with filter preservation"""
+    def _handle_revisualization(self, question: str, df: UnifiedDataFrame) -> Dict[str, Any]:
+        """Handle re-visualization of existing data with filter preservation and new filter detection"""
         
         logger.info("Handling re-visualization request")
         
-        # Check if previous query had filters we should preserve
-        previous_sql = None
-        previous_filters = {}
+        # Get previous SQL for context
+        previous_sql = self._last_sql_query
+        if not previous_sql:
+            recent_messages = self.conversation_state.get_recent_messages(2)
+            for msg in reversed(recent_messages):
+                if msg.role == "assistant" and msg.sql_query:
+                    previous_sql = msg.sql_query
+                    break
         
-        recent_messages = self.conversation_state.get_recent_messages(2)
-        for msg in reversed(recent_messages):
-            if msg.role == "assistant" and msg.sql_query:
-                previous_sql = msg.sql_query
-                previous_filters = self._extract_sql_filters(previous_sql)
-                break
+        # Convert to Pandas for filtering operations
+        filtered_df = ensure_pandas(df) if DataFrameFactory.is_dask(df) else df.copy()
         
-        # Apply filters to dataframe if they exist
-        filtered_df = df.copy()
-        if previous_filters:
-            logger.info(f"Applying preserved filters: {previous_filters}")
-            for col_name, col_value in previous_filters.items():
+        # Extract NEW filters from user's question (e.g., "show anesthesia" -> filter department='Anesthesia')
+        new_filters = self._extract_filters_from_question(question, filtered_df.columns.tolist())
+        applied_filters = {}
+        
+        if new_filters:
+            logger.info(f"Detected new filters from question: {new_filters}")
+            for col_name, col_value in new_filters.items():
                 if col_name in filtered_df.columns:
-                    # Case-insensitive string matching
+                    # Case-insensitive string matching for text columns
                     if filtered_df[col_name].dtype == 'object':
                         filtered_df = filtered_df[filtered_df[col_name].str.lower() == col_value.lower()]
                     else:
                         filtered_df = filtered_df[filtered_df[col_name] == col_value]
+                    applied_filters[col_name] = col_value
                     logger.info(f"Applied filter {col_name}={col_value}, remaining rows: {len(filtered_df)}")
+        
+        # Check if we got any results
+        if len(filtered_df) == 0:
+            logger.warning("Filtering resulted in empty DataFrame, using original data")
+            filtered_df = ensure_pandas(df) if DataFrameFactory.is_dask(df) else df.copy()
+            applied_filters = {}
         
         # Analyze what visualization is requested
         viz_response = self._should_visualize(question, filtered_df)
         
         # Generate new answer focusing on visualization
-        if previous_filters:
-            filter_desc = ", ".join([f"{k}='{v}'" for k, v in previous_filters.items()])
-            answer = f"I've created a {viz_response.primary_chart} visualization of the filtered data ({filter_desc}). {viz_response.visualization_rationale}"
+        if applied_filters:
+            filter_desc = ", ".join([f"{k}='{v}'" for k, v in applied_filters.items()])
+            answer = f"I've created a {viz_response.primary_chart} visualization filtered by {filter_desc}. {viz_response.visualization_rationale}"
         else:
             answer = f"I've created a {viz_response.primary_chart} visualization of the previous data. {viz_response.visualization_rationale}"
         
@@ -924,9 +959,44 @@ Available tables and columns:
                 "rationale": viz_response.visualization_rationale
             }
         
+        # Store the filtered DataFrame for potential follow-up questions
+        self._last_dataframe = filtered_df
+        logger.info(f"Updated stored DataFrame ({len(filtered_df)} rows) after re-visualization")
+        
         return result
+    
+    def _extract_filters_from_question(self, question: str, columns: List[str]) -> Dict[str, str]:
+        """Extract filter criteria from user's question by matching column values"""
+        
+        filters = {}
+        question_lower = question.lower()
+        
+        # For each column, check if any of its unique values are mentioned in the question
+        try:
+            # Get the stored dataframe to check unique values
+            if self._last_dataframe is not None:
+                df_to_check = ensure_pandas(self._last_dataframe) if DataFrameFactory.is_dask(self._last_dataframe) else self._last_dataframe
+                
+                for col in columns:
+                    if df_to_check[col].dtype == 'object':  # Only check string columns
+                        try:
+                            unique_values = df_to_check[col].dropna().unique()
+                            for val in unique_values:
+                                val_str = str(val).lower()
+                                # Check if the value appears in the question
+                                if val_str in question_lower and len(val_str) > 2:  # Avoid matching very short strings
+                                    filters[col] = str(val)
+                                    logger.info(f"Found filter match: {col}='{val}' from question")
+                                    break  # Only one filter per column
+                        except Exception as e:
+                            logger.debug(f"Could not check column {col}: {e}")
+                            continue
+        except Exception as e:
+            logger.warning(f"Error extracting filters from question: {e}")
+        
+        return filters
 
-    def _handle_transformation(self, question: str, df: pd.DataFrame) -> Dict[str, Any]:
+    def _handle_transformation(self, question: str, df: UnifiedDataFrame) -> Dict[str, Any]:
         """Handle transformation of existing data (filter, sort, calculate)"""
         
         logger.info("Handling data transformation request")
@@ -958,12 +1028,14 @@ Example formats:
                 code = code.split("```")[1].split("```")[0].strip()
             
             # Execute transformation safely
-            local_vars = {"df": df.copy(), "pd": pd}
+            # Convert to Pandas for exec (LLM generates Pandas code)
+            work_df = ensure_pandas(df) if DataFrameFactory.is_dask(df) else df.copy()
+            local_vars = {"df": work_df, "pd": pd}
             exec(code, {"__builtins__": {}}, local_vars)
             transformed_df = local_vars["df"]
             
             # Generate answer
-            answer = f"I've transformed the data: {code}\n\nResult has {len(transformed_df)} rows."
+            answer = f"I've transformed the data: {code}\n\nResult has {DataFrameFactory.get_length(transformed_df)} rows."
             
             # Check for visualization
             viz_response = self._should_visualize(question, transformed_df)
@@ -996,7 +1068,7 @@ Example formats:
                 "data": df
             }
 
-    def _process_with_existing_data(self, question: str, df: pd.DataFrame) -> Dict[str, Any]:
+    def _process_with_existing_data(self, question: str, df: UnifiedDataFrame) -> Dict[str, Any]:
         """Process question using existing data without new query"""
         
         answer = self._generate_answer(question, df, None)
@@ -1040,10 +1112,13 @@ Example formats:
         df_snapshot = None
         if result.get("data") is not None:
             df = result["data"]
+            df_len = DataFrameFactory.get_length(df)
+            # Use ensure_pandas for snapshot (always small, safe to convert)
+            sample_df = ensure_pandas(df, max_rows=3)
             df_snapshot = {
                 "columns": list(df.columns),
-                "row_count": len(df),
-                "sample": df.head(3).to_dict() if len(df) > 0 else {}
+                "row_count": df_len,
+                "sample": sample_df.to_dict() if df_len > 0 else {}
             }
         
         viz_info = None
@@ -1073,11 +1148,13 @@ Example formats:
         # Add data context if new data was retrieved
         if result.get("data") is not None and result.get("sql_query"):
             df = result["data"]
+            df_len = DataFrameFactory.get_length(df)
+            sample_df = ensure_pandas(df, max_rows=5)
             self.conversation_state.add_data_context(DataContext(
                 query=result["sql_query"],
                 columns=list(df.columns),
-                row_count=len(df),
-                sample_data=df.head(5).to_dict() if len(df) > 0 else {}
+                row_count=df_len,
+                sample_data=sample_df.to_dict() if df_len > 0 else {}
             ))
         
         # Add visualization record
@@ -1085,7 +1162,7 @@ Example formats:
             self.conversation_state.add_visualization(VisualizationRecord(
                 question=question,
                 chart_type=result["visualization"]["type"],
-                data_summary=f"{len(result['data'])} rows" if result.get("data") is not None else "N/A"
+                data_summary=f"{DataFrameFactory.get_length(result['data'])} rows" if result.get("data") is not None else "N/A"
             ))
 
     
@@ -1630,20 +1707,24 @@ Example formats:
     def _generate_answer(
         self,
         question: str,
-        df: pd.DataFrame,
+        df: UnifiedDataFrame,
         sql_query: Optional[str]
     ) -> str:
         """Generate natural language answer from results"""
         
-        if df.empty:
+        if DataFrameFactory.empty_check(df):
             return "No results found for your question."
         
-        data_summary = f"Found {len(df)} rows"
-        if len(df) > 0:
+        df_len = DataFrameFactory.get_length(df)
+        data_summary = f"Found {df_len} rows"
+        if df_len > 0:
             data_summary += f" with columns: {', '.join(df.columns.tolist())}"
         
         # Provide a larger sample when results are small to enable accurate summaries.
-        sample_df = df if len(df) <= 30 else df.head(10)
+        # Convert to Pandas for string representation
+        sample_df = ensure_pandas(df, max_rows=30) if df_len > 30 else ensure_pandas(df)
+        if len(sample_df) > 10:
+            sample_df = sample_df.head(10)
         sample_data = sample_df.to_string(index=False)
         column_types = ", ".join([f"{col}({str(dtype)})" for col, dtype in df.dtypes.items()])
 
@@ -1683,10 +1764,11 @@ Example formats:
             logger.error(f"Error generating answer: {e}")
             return f"Query executed successfully. {data_summary}"
 
-    def _should_visualize(self, question: str, df: pd.DataFrame) -> VisualizationResponse:
+    def _should_visualize(self, question: str, df: UnifiedDataFrame) -> VisualizationResponse:
         """Determine if and how to visualize the results"""
         
-        if df.empty or len(df) < 2:
+        df_len = DataFrameFactory.get_length(df)
+        if DataFrameFactory.empty_check(df) or df_len < 2:
             return VisualizationResponse(
                 should_visualize=False,
                 primary_chart="none",
@@ -1710,17 +1792,21 @@ Example formats:
         try:
             parser = PydanticOutputParser(pydantic_object=VisualizationResponse)
             
+            # Get sample data for viz analysis (convert to Pandas for display)
+            sample_for_viz = ensure_pandas(df, max_rows=5)
+            numeric_cols = sample_for_viz.select_dtypes(include=['number']).columns.tolist()
+            
             viz_prompt = f"""Analyze this data and determine if visualization would be helpful.
 
 Question: {question}
 
 Data info:
-- Rows: {len(df)}
+- Rows: {df_len}
 - Columns: {', '.join(df.columns.tolist())}
-- Numeric columns: {', '.join(df.select_dtypes(include=['number']).columns.tolist())}
+- Numeric columns: {', '.join(numeric_cols)}
 
 Sample data:
-{df.head(5).to_string()}
+{sample_for_viz.to_string()}
 
 {parser.get_format_instructions()}
 
@@ -1739,10 +1825,13 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
             logger.error(f"Error in visualization decision: {e}")
             return self._simple_viz_recommendation(question, df)
 
-    def _simple_viz_recommendation(self, question: str, result_df: pd.DataFrame) -> VisualizationResponse:
+    def _simple_viz_recommendation(self, question: str, result_df: UnifiedDataFrame) -> VisualizationResponse:
         """Simple rule-based visualization recommendation as fallback"""
+        # Convert to Pandas for type checking (small sample is fine)
+        df_sample = ensure_pandas(result_df, max_rows=1000) if DataFrameFactory.is_dask(result_df) else result_df
+        
         q_lower = question.lower()
-        columns = list(result_df.columns)
+        columns = list(df_sample.columns)
         
         # Detect box plot request
         if 'box' in q_lower or 'distribution' in q_lower:
@@ -1750,14 +1839,14 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
             numeric_col = None
             
             for col in columns:
-                if result_df[col].dtype in ['object', 'string']:
+                if df_sample[col].dtype in ['object', 'string']:
                     category_col = col
-                elif result_df[col].dtype in ['int64', 'float64']:
+                elif df_sample[col].dtype in ['int64', 'float64']:
                     numeric_col = col
             
             # Check if we have multiple values per category (needed for box plots)
             if category_col and numeric_col:
-                counts = result_df.groupby(category_col).size()
+                counts = df_sample.groupby(category_col).size()
                 if (counts >= 4).any():
                     return VisualizationResponse(
                         should_visualize=True,
@@ -1794,7 +1883,7 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
             visualization_rationale='Default bar chart visualization'
         )
 
-    def _resolve_column_name(self, df: pd.DataFrame, column_name: Optional[str]) -> Optional[str]:
+    def _resolve_column_name(self, df: UnifiedDataFrame, column_name: Optional[str]) -> Optional[str]:
         """Resolve a column reference against dataframe columns (case/quote insensitive)"""
         if column_name is None:
             return None
@@ -1806,24 +1895,26 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
             return stripped
         return columns_lower.get(stripped.lower())
 
-    def _select_default_columns(self, df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
+    def _select_default_columns(self, df: UnifiedDataFrame) -> Tuple[Optional[str], Optional[str]]:
         """Return default categorical and numeric columns for visualization fallbacks"""
-        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-        categorical_cols = [col for col in df.columns if col not in numeric_cols]
-        default_cat = categorical_cols[0] if categorical_cols else (df.columns[0] if len(df.columns) > 0 else None)
-        default_num = numeric_cols[0] if numeric_cols else (df.columns[1] if len(df.columns) > 1 else None)
+        # Convert to Pandas for column type detection if needed
+        pandas_df = ensure_pandas(df, max_rows=100) if DataFrameFactory.is_dask(df) else df
+        numeric_cols = pandas_df.select_dtypes(include=['number']).columns.tolist()
+        categorical_cols = [col for col in pandas_df.columns if col not in numeric_cols]
+        default_cat = categorical_cols[0] if categorical_cols else (pandas_df.columns[0] if len(pandas_df.columns) > 0 else None)
+        default_num = numeric_cols[0] if numeric_cols else (pandas_df.columns[1] if len(pandas_df.columns) > 1 else None)
         return default_cat, default_num
 
     def _create_visualization(
         self,
-        df: pd.DataFrame,
+        df: UnifiedDataFrame,
         viz_response: VisualizationResponse
     ) -> Optional[go.Figure]:
         """
         Create visualization based on recommendation.
         
         Args:
-            df (pd.DataFrame): The data to visualize.
+            df (UnifiedDataFrame): The data to visualize (Pandas or Dask).
             viz_response (VisualizationResponse): The visualization configuration.
             
         Returns:
@@ -1833,6 +1924,17 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
         try:
             import plotly.express as px
             from pandas.api.types import is_numeric_dtype
+            
+            # CRITICAL: Convert Dask to Pandas for Plotly (Plotly doesn't support Dask)
+            # Sample large datasets to prevent browser performance issues
+            if DataFrameFactory.is_dask(df):
+                df_size = DataFrameFactory.get_length(df)
+                if df_size > 10000:
+                    logger.info(f"📊 Sampling 10,000 rows from {df_size:,} for visualization")
+                    df = ensure_pandas(df, max_rows=10000)
+                else:
+                    df = ensure_pandas(df)
+                logger.info(f"✅ Converted Dask to Pandas for visualization ({len(df)} rows)")
             
             chart_type = viz_response.primary_chart.lower()
             title = viz_response.title or "Data Visualization"
@@ -2021,13 +2123,14 @@ Available chart types: bar, line, pie, scatter, histogram, box, multiple_bar"""
             
             elif chart_type == "pie":
                 # Safely select top 10 rows for pie chart
-                df_pie = df.copy()
-                if len(df) > 10:
+                # Convert to Pandas first for Plotly compatibility
+                df_pie = ensure_pandas(df)
+                if len(df_pie) > 10:
                     # Only use nlargest if y_axis is a valid numeric column
-                    if y_axis and y_axis in df.columns and is_numeric_dtype(df[y_axis]):
-                        df_pie = df.nlargest(10, y_axis)
+                    if y_axis and y_axis in df_pie.columns and is_numeric_dtype(df_pie[y_axis]):
+                        df_pie = df_pie.nlargest(10, y_axis)
                     else:
-                        df_pie = df.head(10)
+                        df_pie = df_pie.head(10)
                 
                 fig = px.pie(
                     df_pie,

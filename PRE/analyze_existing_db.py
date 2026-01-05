@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 
 # analysis of a single database table.
-
 class MetadataResponse(BaseModel):
     """Metadata response model"""
     table_name: str = Field(description="Table name")    # confirms which table the AI is currently analyzing
@@ -460,8 +459,8 @@ Column Count: {len(analysis['column_analyses'])}
                     "business_context": metadata.get('business_context', ''),
                     "suggested_primary_key": metadata.get('suggested_primary_key', ''),
                     "data_quality_notes": json.dumps(metadata.get('data_quality_notes', [])),
-                    "row_count": analysis.get('row_count', 0),
-                    "column_count": len(analysis['column_analyses'])
+                    "row_count": int(analysis.get('row_count', 0)),
+                    "column_count": int(len(analysis['column_analyses']))
                 }]
             )
             
@@ -502,8 +501,8 @@ Null Count: {col_analysis.get('null_count', 0)}
                     "constraints": json.dumps(col_analysis.get('constraints', [])),
                     "is_nullable": str(col_analysis.get('is_nullable', True)),
                     "suggested_index": str(col_analysis.get('suggested_index', False)),
-                    "unique_count": col_analysis.get('unique_count', 0),
-                    "null_count": col_analysis.get('null_count', 0)
+                    "unique_count": int(col_analysis.get('unique_count', 0)),
+                    "null_count": int(col_analysis.get('null_count', 0))
                 })
             
             if column_ids:

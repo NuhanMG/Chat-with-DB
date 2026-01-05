@@ -2,16 +2,17 @@
 Standalone CSV to SQLite Database Creator with LLM Analysis
 
 This script:
-1. Loads a CSV file
+1. Loads a CSV file (supports large files via chunked processing)
 2. Uses Ollama LLM to analyze metadata and column types
 3. Creates a SQLite database with proper schema
-4. Inserts the data
+4. Inserts the data in batches for memory efficiency
 
 Usage:
-    python csv_to_db.py <csv_file> [--db database.db] [--model qwen2.5:7b]
+    python csv_to_db.py <csv_file> [--db database.db] [--model qwen2.5:7b] [--chunksize 50000]
     
 Example:
     python csv_to_db.py sales.csv --db analysis.db --model qwen2.5:7b
+    python csv_to_db.py large_file.csv --db analysis.db --chunksize 100000
 """
 
 import os
@@ -20,7 +21,8 @@ import sqlite3
 import logging
 import argparse
 import json
-from typing import Dict, List, Any
+import gc
+from typing import Dict, List, Any, Iterator
 
 import pandas as pd
 from langchain_ollama import ChatOllama
@@ -55,11 +57,16 @@ class DataTypeResponse(BaseModel):
 
 
 class CSVtoDatabaseConverter:
-    """Convert CSV to SQLite with LLM-powered analysis"""
+    """Convert CSV to SQLite with LLM-powered analysis (supports large files)"""
     
-    def __init__(self, model: str = "qwen2.5:7b", db_path: str = "marks.db"):
+    # Default chunk size for processing large files
+    DEFAULT_CHUNK_SIZE = 50000  # 50k rows per chunk
+    SAMPLE_SIZE = 5000  # Rows to sample for LLM analysis
+    
+    def __init__(self, model: str = "qwen2.5:7b", db_path: str = "marks.db", chunksize: int = None):
         self.model = model
         self.db_path = db_path
+        self.chunksize = chunksize or self.DEFAULT_CHUNK_SIZE
         
         # Initialize LLM
         logger.info(f"Initializing Ollama with model: {model}")
@@ -215,28 +222,31 @@ Determine the optimal:
             "suggested_index": False
         }
     
-    def create_database(self, df: pd.DataFrame, metadata: Dict, column_analysis: Dict[str, Dict]):
-        """Create SQLite database with analyzed schema"""
+    def create_database(self, df_sample: pd.DataFrame, metadata: Dict, column_analysis: Dict[str, Dict], csv_file: str):
+        """Create SQLite database with analyzed schema and insert data in chunks"""
         logger.info(f"Creating database: {self.db_path}")
         
         table_name = metadata['table_name']
         
-        # Clean column names
+        # Clean column names - create mapping
+        original_columns = df_sample.columns.tolist()
         clean_columns = []
-        for col in df.columns:
+        column_mapping = {}
+        for col in original_columns:
             clean_col = re.sub(r'[^a-zA-Z0-9_]', '_', col.lower())
             clean_columns.append(clean_col)
+            column_mapping[col] = clean_col
         
         # Build CREATE TABLE statement
         ddl_parts = [f"CREATE TABLE IF NOT EXISTS {table_name} ("]
         
-        for orig_col, clean_col in zip(df.columns, clean_columns):
+        for orig_col, clean_col in zip(original_columns, clean_columns):
             col_info = column_analysis.get(orig_col, {})
             sql_type = col_info.get('sql_type', 'TEXT')
             constraints = col_info.get('constraints', [])
             
-            if not col_info.get('is_nullable', True) and 'NOT NULL' not in constraints:
-                constraints.append("NOT NULL")
+            # Avoid strict constraints based on partial samples
+            constraints = [c for c in constraints if c.upper() not in ['NOT NULL', 'UNIQUE']]
             
             constraint_str = " ".join(constraints) if constraints else ""
             ddl_parts.append(f"    {clean_col} {sql_type} {constraint_str},")
@@ -251,61 +261,129 @@ Determine the optimal:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
+        # Enable optimizations for bulk insert
+        cursor.execute("PRAGMA journal_mode = OFF")
+        cursor.execute("PRAGMA synchronous = OFF")
+        cursor.execute("PRAGMA cache_size = 1000000")  # ~1GB cache
+        cursor.execute("PRAGMA temp_store = MEMORY")
+        
         cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
         cursor.execute(ddl)
-        
-        # Prepare data for insertion
-        df_clean = df.copy()
-        df_clean.columns = clean_columns
-        
-        # Type conversions
-        for orig_col, clean_col in zip(df.columns, clean_columns):
-            col_info = column_analysis.get(orig_col, {})
-            sql_type = col_info.get('sql_type', 'TEXT')
-            
-            if sql_type == 'DATE':
-                df_clean[clean_col] = pd.to_datetime(df_clean[clean_col], errors='coerce')
-            elif sql_type == 'INTEGER':
-                df_clean[clean_col] = pd.to_numeric(df_clean[clean_col], errors='coerce', downcast='integer')
-            elif sql_type == 'REAL':
-                df_clean[clean_col] = pd.to_numeric(df_clean[clean_col], errors='coerce')
-        
-        # Insert data
-        df_clean.to_sql(table_name, conn, if_exists='replace', index=False)
         conn.commit()
         
-        # Verify
+        # Insert data in chunks
+        logger.info(f"Inserting data in chunks of {self.chunksize} rows...")
+        total_rows = 0
+        chunk_num = 0
+        
+        # Build type conversion info once
+        type_conversions = {}
+        for orig_col in original_columns:
+            col_info = column_analysis.get(orig_col, {})
+            type_conversions[orig_col] = col_info.get('sql_type', 'TEXT')
+        
+        # Read and insert in chunks
+        for chunk in pd.read_csv(csv_file, chunksize=self.chunksize, low_memory=True):
+            chunk_num += 1
+            
+            # Rename columns
+            chunk.columns = clean_columns
+            
+            # Apply type conversions
+            for orig_col, clean_col in zip(original_columns, clean_columns):
+                sql_type = type_conversions.get(orig_col, 'TEXT')
+                
+                if sql_type == 'DATE':
+                    chunk[clean_col] = pd.to_datetime(chunk[clean_col], errors='coerce')
+                elif sql_type == 'INTEGER':
+                    chunk[clean_col] = pd.to_numeric(chunk[clean_col], errors='coerce', downcast='integer')
+                elif sql_type == 'REAL':
+                    chunk[clean_col] = pd.to_numeric(chunk[clean_col], errors='coerce')
+            
+            # Insert chunk
+            chunk.to_sql(table_name, conn, if_exists='append', index=False)
+            total_rows += len(chunk)
+            
+            if chunk_num % 10 == 0:
+                logger.info(f"  Processed chunk {chunk_num}: {total_rows:,} rows inserted so far...")
+                gc.collect()  # Free memory
+        
+        conn.commit()
+        
+        # Re-enable normal mode and verify
+        cursor.execute("PRAGMA journal_mode = DELETE")
+        cursor.execute("PRAGMA synchronous = FULL")
+        
         cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
         count = cursor.fetchone()[0]
         
-        logger.info(f"✅ Created table '{table_name}' with {count} rows")
+        logger.info(f"✅ Created table '{table_name}' with {count:,} rows")
         
         conn.close()
-        return table_name
+        return table_name, count
+    
+    def _get_file_info(self, csv_file: str) -> Dict:
+        """Get basic file info without loading entire file"""
+        file_size = os.path.getsize(csv_file)
+        file_size_mb = file_size / (1024 * 1024)
+        file_size_gb = file_size / (1024 * 1024 * 1024)
+        
+        # Count rows efficiently (without loading into memory)
+        logger.info("Counting rows (this may take a moment for large files)...")
+        row_count = 0
+        with open(csv_file, 'r', encoding='utf-8', errors='ignore') as f:
+            for _ in f:
+                row_count += 1
+        row_count -= 1  # Subtract header row
+        
+        return {
+            'file_size_bytes': file_size,
+            'file_size_mb': file_size_mb,
+            'file_size_gb': file_size_gb,
+            'row_count': row_count
+        }
+    
+    def _load_sample(self, csv_file: str) -> pd.DataFrame:
+        """Load only a sample of the CSV for analysis"""
+        logger.info(f"Loading sample of {self.SAMPLE_SIZE} rows for analysis...")
+        return pd.read_csv(csv_file, nrows=self.SAMPLE_SIZE, low_memory=True)
     
     def convert(self, csv_file: str) -> str:
-        """Main conversion workflow"""
+        """Main conversion workflow with chunked processing for large files"""
         logger.info(f"Starting conversion: {csv_file} → {self.db_path}")
         
-        # Load CSV
-        logger.info("Loading CSV file...")
-        df = pd.read_csv(csv_file)
-        logger.info(f"✓ Loaded {len(df)} rows, {len(df.columns)} columns")
+        # Get file info
+        file_info = self._get_file_info(csv_file)
+        logger.info(f"✓ File size: {file_info['file_size_mb']:.2f} MB ({file_info['file_size_gb']:.2f} GB)")
+        logger.info(f"✓ Total rows: {file_info['row_count']:,}")
         
-        # Analyze metadata
-        metadata = self.analyze_metadata(df, csv_file)
+        # Load only a sample for LLM analysis (not entire file)
+        df_sample = self._load_sample(csv_file)
+        logger.info(f"✓ Loaded sample: {len(df_sample)} rows, {len(df_sample.columns)} columns")
         
-        # Analyze each column
-        logger.info("Analyzing columns...")
+        # Analyze metadata using sample
+        metadata = self.analyze_metadata(df_sample, csv_file)
+        
+        # Analyze each column using sample data
+        logger.info("Analyzing columns using sample data...")
         column_analysis = {}
-        for col in df.columns:
+        for col in df_sample.columns:
             logger.info(f"  Analyzing column: {col}")
-            col_info = self.analyze_column(col, df[col])
+            col_info = self.analyze_column(col, df_sample[col])
             column_analysis[col] = col_info
             logger.info(f"    → Type: {col_info['sql_type']}, Nullable: {col_info['is_nullable']}")
         
-        # Create database
-        table_name = self.create_database(df, metadata, column_analysis)
+        # Free sample memory before bulk insert
+        del df_sample
+        gc.collect()
+        
+        # Create database and insert data in chunks
+        table_name, total_rows = self.create_database(
+            self._load_sample(csv_file),  # Reload sample for column names
+            metadata, 
+            column_analysis, 
+            csv_file
+        )
         
         logger.info(f"\n{'='*60}")
         logger.info("✅ CONVERSION COMPLETE")
@@ -314,7 +392,8 @@ Determine the optimal:
         logger.info(f"Table: {table_name}")
         logger.info(f"Description: {metadata['description']}")
         logger.info(f"Category: {metadata['category']}")
-        logger.info(f"Rows: {len(df)}")
+        logger.info(f"Rows: {total_rows:,}")
+        logger.info(f"Original file size: {file_info['file_size_mb']:.2f} MB")
         logger.info(f"{'='*60}\n")
         
         return table_name
@@ -322,11 +401,13 @@ Determine the optimal:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Convert CSV to SQLite database with LLM-powered analysis'
+        description='Convert CSV to SQLite database with LLM-powered analysis (supports large files)'
     )
     parser.add_argument('csv_file', help='Path to CSV file')
     parser.add_argument('--db', default='analysis.db', help='Output database path (default: analysis.db)')
     parser.add_argument('--model', default='qwen2.5:7b', help='Ollama model to use (default: qwen2.5:7b)')
+    parser.add_argument('--chunksize', type=int, default=50000, 
+                        help='Number of rows to process at a time (default: 50000). Increase for faster processing, decrease if running out of memory.')
     
     args = parser.parse_args()
     
@@ -337,7 +418,11 @@ def main():
     
     try:
         # Create converter and run
-        converter = CSVtoDatabaseConverter(model=args.model, db_path=args.db)
+        converter = CSVtoDatabaseConverter(
+            model=args.model, 
+            db_path=args.db,
+            chunksize=args.chunksize
+        )
         converter.convert(args.csv_file)
         return 0
     except Exception as e:
