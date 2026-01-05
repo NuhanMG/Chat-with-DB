@@ -11,7 +11,6 @@ from dotenv import load_dotenv
 
 from QueryAgent_Ollama_Enhanced import QueryAgentEnhanced
 from conversation_manager import ConversationState
-from dataframe_factory import DataFrameFactory, ensure_pandas, get_backend_name
 
 # Load environment variables from .env file
 load_dotenv()
@@ -301,15 +300,11 @@ def process_question(question: str, history: List):
         
         # 3. Data Table
         df = result.get("data")
-        if df is not None and not DataFrameFactory.empty_check(df):
-            # Get row count before converting to Pandas
-            total_rows = DataFrameFactory.get_length(df)
-            backend_name = get_backend_name(df)
-            
-            # Limit rows for display - ensure we have Pandas for HTML rendering
-            df_display = ensure_pandas(df, max_rows=100)
+        if df is not None and not df.empty:
+            # Limit rows for display
+            df_display = df.head(100)
             html_table = df_display.to_html(classes='data-table', index=False, border=0)
-            table_msg = f'<div class="table-container"><details open><summary>Data Preview ({total_rows:,} rows) [Backend: {backend_name}]</summary>{html_table}</details></div>'
+            table_msg = f'<div class="table-container"><details open><summary>Data Preview ({len(df)} rows)</summary>{html_table}</details></div>'
             history.append((None, table_msg))
         
         # Save conversation
