@@ -14,14 +14,6 @@ pyarrow>=14.0.0            # Columnar data format (pandas optimization)
 fastparquet>=2023.10.0     # Parquet file support
 
 # ==============================================================================
-# FUTURE: PYSPARK ECOSYSTEM (for migration from pandas)
-# ==============================================================================
-pyspark>=3.5.0             # Distributed data processing framework
-py4j>=0.10.9.7             # PySpark dependency
-delta-spark>=3.0.0         # Delta Lake for PySpark
-# Note: koalas is deprecated - use pyspark.pandas (included in PySpark 3.2+) instead
-
-# ==============================================================================
 # LANGCHAIN & LLM FRAMEWORK
 # ==============================================================================
 langchain>=0.3.14           # LangChain core framework
@@ -37,13 +29,6 @@ pydantic-core>=2.0.0       # Pydantic core dependency
 # ==============================================================================
 chromadb>=0.4.0            # Vector database for metadata storage (current)
 chroma-hnswlib>=0.7.0      # HNSW implementation for ChromaDB
-# Alternative vector databases for production
-faiss-cpu>=1.7.4           # Facebook AI Similarity Search (CPU version)
-# faiss-gpu>=1.7.4         # FAISS GPU version (for GPU servers)
-pinecone-client>=3.0.0     # Pinecone cloud vector database
-weaviate-client>=4.4.0     # Weaviate vector database
-qdrant-client>=1.7.0       # Qdrant vector database
-pymilvus>=2.3.0            # Milvus vector database client
 
 # ==============================================================================
 # RAG EVALUATION & TESTING
@@ -52,57 +37,24 @@ ragas>=0.1.0               # RAG evaluation framework
 deepeval>=0.20.0           # LLM evaluation framework
 langsmith>=0.0.87          # LangChain tracing and evaluation
 trulens-eval>=0.19.0       # TruLens for RAG evaluation
-# promptfoo - Note: promptfoo is Node.js based, use via CLI or API
 
 # ==============================================================================
 # VISUALIZATION - CURRENT & FUTURE
 # ==============================================================================
 # Current: Plotly
 plotly>=5.14.0             # Interactive visualizations (current)
-kaleido>=0.2.1             # Static image export for Plotly
-
-# Future: Dash
-dash>=2.14.0               # Dash web framework for analytics apps
-dash-bootstrap-components>=1.5.0  # Bootstrap components for Dash
-dash-ag-grid>=2.4.0        # AG Grid for Dash (advanced tables)
-dash-cytoscape>=0.3.0      # Network graphs for Dash
-
-# Additional visualization libraries
-matplotlib>=3.8.0          # Static plotting
-seaborn>=0.13.0            # Statistical visualization
-altair>=5.2.0              # Declarative visualization
 
 # ==============================================================================
 # USER INTERFACE
 # ==============================================================================
 gradio              # Web UI framework (current)
-streamlit>=1.29.0          # Alternative UI framework
-flask>=3.0.0               # Lightweight web framework
-flask-cors>=4.0.0          # CORS support for Flask
-
-# ==============================================================================
-# DATABASE CONNECTORS & ORM
-# ==============================================================================
-sqlalchemy>=2.0.0          # SQL toolkit and ORM
-psycopg2-binary>=2.9.9     # PostgreSQL adapter
-pymongo>=4.6.0             # MongoDB driver
-redis>=5.0.0               # Redis client
-motor>=3.3.0               # Async MongoDB driver
-asyncpg>=0.29.0            # Async PostgreSQL driver
-aiomysql>=0.2.0            # Async MySQL driver
-clickhouse-driver>=0.2.6   # ClickHouse driver
 
 # ==============================================================================
 # API DEVELOPMENT & PRODUCTION
 # ==============================================================================
 fastapi>=0.109.0           # Modern async web framework
-uvicorn[standard]>=0.27.0  # ASGI server
 pydantic-settings>=2.1.0   # Settings management
 python-multipart>=0.0.6    # Multipart form data parsing
-gunicorn>=21.2.0           # WSGI HTTP server for production
-websockets>=12.0           # WebSocket support
-aiohttp>=3.9.0             # Async HTTP client/server
-httpx>=0.26.0              # Modern HTTP client
 
 # ==============================================================================
 # TESTING & QUALITY ASSURANCE
@@ -115,23 +67,6 @@ hypothesis>=6.92.0         # Property-based testing
 locust>=2.20.0             # Load testing
 faker>=22.0.0              # Fake data generation
 
-# ==============================================================================
-# MONITORING, LOGGING & OBSERVABILITY
-# ==============================================================================
-loguru>=0.7.2              # Advanced logging
-structlog>=24.1.0          # Structured logging
-prometheus-client>=0.19.0  # Prometheus metrics
-opentelemetry-api>=1.22.0  # OpenTelemetry tracing
-opentelemetry-sdk>=1.22.0  # OpenTelemetry SDK
-sentry-sdk>=1.39.0         # Error tracking
-
-# ==============================================================================
-# DATA VALIDATION & QUALITY
-# ==============================================================================
-great-expectations>=0.18.0 # Data validation framework
-pandera>=0.18.0            # Pandas data validation
-cerberus>=1.3.5            # Data validation
-marshmallow>=3.20.0        # Object serialization/validation
 
 # ==============================================================================
 # CACHING & PERFORMANCE
@@ -156,16 +91,6 @@ nltk>=3.8.1                # Natural language toolkit
 textstat>=0.7.3            # Text statistics
 
 # ==============================================================================
-# SECURITY & AUTHENTICATION
-# ==============================================================================
-cryptography>=42.0.0       # Cryptographic recipes
-pyjwt>=2.8.0               # JSON Web Token
-bcrypt>=4.1.0              # Password hashing
-python-jose>=3.3.0         # JOSE implementation
-passlib>=1.7.4             # Password hashing utilities
-authlib>=1.3.0             # OAuth/OpenID Connect
-
-# ==============================================================================
 # CONFIGURATION & SECRETS MANAGEMENT
 # ==============================================================================
 python-dotenv>=1.0.0       # Environment variable management (current)
@@ -173,24 +98,6 @@ pyyaml>=6.0.1              # YAML parser
 toml>=0.10.2               # TOML parser
 configparser>=6.0.0        # Configuration file parser
 hvac>=2.1.0                # HashiCorp Vault client
-
-# ==============================================================================
-# SCHEDULING & BACKGROUND TASKS
-# ==============================================================================
-celery>=5.3.0              # Distributed task queue
-redis>=5.0.0               # Redis (Celery backend)
-apscheduler>=3.10.0        # Advanced Python scheduler
-rq>=1.15.0                 # Simple job queue
-dramatiq>=1.15.0           # Task processing library
-
-# ==============================================================================
-# DATA EXPORT & REPORTING
-# ==============================================================================
-jinja2>=3.1.0              # Template engine
-reportlab>=4.0.0           # PDF generation
-fpdf2>=2.7.0               # PDF generation (alternative)
-python-docx>=1.1.0         # Word document generation
-xlsxwriter>=3.1.0          # Excel writing
 
 # ==============================================================================
 # UTILITIES & HELPERS
@@ -206,16 +113,6 @@ arrow>=1.3.0               # Better datetime handling
 pytz>=2024.1               # Timezone definitions
 humanize>=4.9.0            # Human-friendly data formatting
 validators>=0.22.0         # Data validation
-
-# ==============================================================================
-# FILE & DATA PROCESSING
-# ==============================================================================
-chardet>=5.2.0             # Character encoding detection
-filetype>=1.2.0            # File type detection
-python-magic>=0.4.27       # File type identification
-pillow>=10.2.0             # Image processing
-pypdf2>=3.0.0              # PDF processing
-pdfplumber>=0.10.0         # PDF text extraction
 
 # ==============================================================================
 # LINUX-SPECIFIC UTILITIES
