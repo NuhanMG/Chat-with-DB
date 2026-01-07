@@ -13,13 +13,6 @@ xlrd>=2.0.0                # Excel file support (legacy .xls)
 pyarrow>=14.0.0            # Columnar data format (pandas optimization)
 fastparquet>=2023.10.0     # Parquet file support
 
-# ==============================================================================
-# FUTURE: PYSPARK ECOSYSTEM (for migration from pandas)
-# ==============================================================================
-pyspark>=3.5.0             # Distributed data processing framework
-py4j>=0.10.9.7             # PySpark dependency
-delta-spark>=3.0.0         # Delta Lake for PySpark
-# Note: koalas is deprecated - use pyspark.pandas (included in PySpark 3.2+) instead
 
 # ==============================================================================
 # LANGCHAIN & LLM FRAMEWORK
@@ -37,13 +30,7 @@ pydantic-core>=2.0.0       # Pydantic core dependency
 # ==============================================================================
 chromadb>=0.4.0            # Vector database for metadata storage (current)
 chroma-hnswlib>=0.7.0      # HNSW implementation for ChromaDB
-# Alternative vector databases for production
-faiss-cpu>=1.7.4           # Facebook AI Similarity Search (CPU version)
-# faiss-gpu>=1.7.4         # FAISS GPU version (for GPU servers)
-pinecone-client>=3.0.0     # Pinecone cloud vector database
-weaviate-client>=4.4.0     # Weaviate vector database
-qdrant-client>=1.7.0       # Qdrant vector database
-pymilvus>=2.3.0            # Milvus vector database client
+
 
 # ==============================================================================
 # RAG EVALUATION & TESTING
@@ -52,33 +39,18 @@ ragas>=0.1.0               # RAG evaluation framework
 deepeval>=0.20.0           # LLM evaluation framework
 langsmith>=0.0.87          # LangChain tracing and evaluation
 trulens-eval>=0.19.0       # TruLens for RAG evaluation
-# promptfoo - Note: promptfoo is Node.js based, use via CLI or API
 
 # ==============================================================================
 # VISUALIZATION - CURRENT & FUTURE
 # ==============================================================================
 # Current: Plotly
 plotly>=5.14.0             # Interactive visualizations (current)
-kaleido>=0.2.1             # Static image export for Plotly
 
-# Future: Dash
-dash>=2.14.0               # Dash web framework for analytics apps
-dash-bootstrap-components>=1.5.0  # Bootstrap components for Dash
-dash-ag-grid>=2.4.0        # AG Grid for Dash (advanced tables)
-dash-cytoscape>=0.3.0      # Network graphs for Dash
-
-# Additional visualization libraries
-matplotlib>=3.8.0          # Static plotting
-seaborn>=0.13.0            # Statistical visualization
-altair>=5.2.0              # Declarative visualization
 
 # ==============================================================================
 # USER INTERFACE
 # ==============================================================================
 gradio              # Web UI framework (current)
-streamlit>=1.29.0          # Alternative UI framework
-flask>=3.0.0               # Lightweight web framework
-flask-cors>=4.0.0          # CORS support for Flask
 
 # ==============================================================================
 # DATABASE CONNECTORS & ORM
