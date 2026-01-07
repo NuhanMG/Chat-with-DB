@@ -24,10 +24,10 @@ delta-spark>=3.0.0         # Delta Lake for PySpark
 # ==============================================================================
 # LANGCHAIN & LLM FRAMEWORK
 # ==============================================================================
-langchain>=0.1.0           # LangChain core framework
-langchain-core>=0.1.0      # LangChain core abstractions
-langchain-community>=0.0.20  # Community integrations (SQLDatabase, tools)
-langchain-ollama>=0.1.0    # Ollama integration for local LLMs
+langchain>=0.3.14           # LangChain core framework
+langchain-core>=0.3.29      # LangChain core abstractions
+langchain-community>=0.3.14  # Community integrations (SQLDatabase, tools)
+langchain-ollama>=0.2.2    # Ollama integration for local LLMs
 langchain-openai>=0.0.5    # OpenAI integration (future cloud deployment)
 pydantic>=2.5.0            # Data validation and parsing (Python 3.12 compatible)
 pydantic-core>=2.0.0       # Pydantic core dependency
@@ -75,7 +75,7 @@ altair>=5.2.0              # Declarative visualization
 # ==============================================================================
 # USER INTERFACE
 # ==============================================================================
-gradio>=4.0.0              # Web UI framework (current)
+gradio              # Web UI framework (current)
 streamlit>=1.29.0          # Alternative UI framework
 flask>=3.0.0               # Lightweight web framework
 flask-cors>=4.0.0          # CORS support for Flask
