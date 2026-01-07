@@ -50,6 +50,18 @@ plotly>=5.14.0             # Interactive visualizations (current)
 gradio              # Web UI framework (current)
 
 # ==============================================================================
+# DATABASE CONNECTORS & ORM
+# ==============================================================================
+sqlalchemy>=2.0.0          # SQL toolkit and ORM
+psycopg2-binary>=2.9.9     # PostgreSQL adapter
+pymongo>=4.6.0             # MongoDB driver
+redis>=5.0.0               # Redis client
+motor>=3.3.0               # Async MongoDB driver
+asyncpg>=0.29.0            # Async PostgreSQL driver
+aiomysql>=0.2.0            # Async MySQL driver
+clickhouse-driver>=0.2.6   # ClickHouse driver
+
+# ==============================================================================
 # API DEVELOPMENT & PRODUCTION
 # ==============================================================================
 fastapi>=0.109.0           # Modern async web framework
